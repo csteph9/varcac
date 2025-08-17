@@ -51,7 +51,7 @@
 
 ```bash
 # clone
-git clone <your-repo-url> && cd <repo-root>
+gh repo clone csteph9/varcac && cd <repo-root>
 
 # bring up app (3001) + db (host 3007)
 docker compose up -d
