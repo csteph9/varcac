@@ -1,5 +1,6 @@
 <p align="center">
   <img src="varcac.png" width=400>
+
 </p>
 
 **Incentive Compensation Management (ICM) engine; compute, track, and prove payouts with confidence.**
