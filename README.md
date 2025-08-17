@@ -53,7 +53,7 @@
 # clone
 gh repo clone csteph9/varcac && cd <repo-root>
 
-# bring up app (3001) + db (host 3007)
+# Launch app with docker
 docker compose up -d
 
 # open the VarCAC
