@@ -23,7 +23,7 @@
 - **Quota-based tiers & accelerators** by period or plan window.
 - **SPIFFs/bonuses** - one-off or scheduled.
 - **Draws / Clawbacks** - for those new reps, or poor performing reps.
-- **Flexible*** manager / team roll-ups
+- **Flexible** manager / team roll-ups
 - **Multi-plan assignments** per participant (AE + SE + stack-ups)
 - **Comp Plan Statements** per participant: detailed comprehensive, auditable, traceable comp plan statements.
 
