@@ -30,12 +30,12 @@
 ---
 
 ## How it works
-1. **Post your data** into a flexible data source model.  
-2. **Build your computations** to apply logic to your source data.
-3. **Define your Comp Plans** with flexible payout periodicity. 
-4. **Attach Computations** to your plans (per-period or whole-window scope).  
-3. **Run Comp Plan Calculations** → deterministic payout lines.
-4. **Export/import** for backup/restore → results in packaged-up files for mobility.
+1. **Populate your team structure** with flexible roll-ups.
+2. **Define Comp Plans** with flexible payout periodicity. 
+3. **Build computations** to apply your comp plan logic.
+4. **Post data** into a flexible data source model.  
+5. **Run Comp Plan Calculations** → deterministic payout lines with comp plan statements.
+6. **Export/import** for backup/restore → results in packaged-up files for mobility.
 
 ---
 
