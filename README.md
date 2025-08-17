@@ -33,7 +33,7 @@
 1. **Post your data** into a flexible data source model.  
 2. **Build your computations** to apply logic to your source data.
 3. **Define your Comp Plans** with flexible payout periodicity. 
-4. **Attach Computations** to a plan your plans (per-period or whole-window scope).  
+4. **Attach Computations** to your plans (per-period or whole-window scope).  
 3. **Run Comp Plan Calculations** → deterministic payout lines.
 4. **Export/import** for backup/restore → results in packaged-up files for mobility.
 
