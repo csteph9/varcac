@@ -64,4 +64,4 @@ http://localhost:3001
 
 ---
 
-**CompTally**: pay exactly how you plan—**locally, transparently, and repeatably**.
+**VarCAC**: pay exactly how you plan - **locally, transparently, and repeatably**.
