@@ -2,7 +2,7 @@
   <img src="varcac.png" width=400>
 </p>
 
-** A Self-hosted incentive compensation (ICM) engine — compute, track, and prove payouts with confidence.**
+**Incentive Compensation Management (ICM) engine; compute, track, and prove payouts with confidence.**
 
 **VarCAC** is a local-first commissions platform for modern sales orgs. It pairs a clean, admin-friendly UI with a powerful JavaScript computation engine, so you can model *any* plan—from simple rate cards to multi-tier accelerators, SPIFFs, draws, manager roll-ups, without giving up control of your data.
 
