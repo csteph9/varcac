@@ -11,11 +11,11 @@
 
 ## Why VarCAC
 - 🔒 **Local-first & private by design** — run it on your own machine or network (Docker). Your data never leaves your environment.
-- 🧠 **Real logic, real results** — a robust **JavaScript** engine drives calculations, letting you encode rules exactly as you pay.
-- 🧩 **Flexible data sources & team structures** — bring your data as-is; model reps, managers, overlays, channels, and special roles.
-- ⏪ **Version everything** — export/import your entire data set to *replay, compare, audit, and backup* any period.
+- 🧠 **Real logic, real results** — a robust **JavaScript** engine drives calculations, letting you encode rules exactly as you pay. It's simpler and more precise than spreadsheet formuals.
+- 🧩 **Flexible data sources & team structures** — bring your data as-is; include plans for reps, managers, stack-ups, or anything else you can imagine.
+- ⏪ **Version everything** — export/import your entire dataset to *replay, compare, audit, backup, and restore* any period.
 - 🤝 **Shareable** — between team-members that use VarCAC enabling collaboration without exposing your whole system.
-- 🪶 **Elegant & minimal** — simple to understand, sophisticated capabilities, fast to operate, with no heavy external dependencies.
+- ✔ **Elegant & minimal** — simple to understand, sophisticated capabilities, fast to operate, with no heavy external dependencies.
 
 ---
 
