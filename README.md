@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="varcac.png" width=300>
+  <img src="varcac.png" width=400>
 </p>
 
 ** A Self-hosted incentive compensation (ICM) engine — compute, track, and prove payouts with confidence.**
