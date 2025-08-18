@@ -1,0 +1,23 @@
+{
+  "name": "nv-coreui-server",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "csv-parse": "^6.1.0",
+    "dotenv": "^17.2.1",
+    "expr-eval": "^2.0.2",
+    "express": "^4.19.2",
+    "express-session": "^1.17.3",
+    "lodash": "^4.17.21",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "mysql2": "^3.14.3",
+    "mysqldump": "^3.2.0",
+    "pdfkit": "^0.17.1"
+  }
+}

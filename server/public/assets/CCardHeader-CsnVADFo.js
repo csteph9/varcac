@@ -1,0 +1,1 @@
+import{y as r,z as d}from"./index-CxdI3lLW.js";const s=r({name:"CCardHeader",props:{as:{type:String,default:"div"}},setup(a,{slots:e}){return()=>d(a.as,{class:"card-header"},e.default&&e.default())}});export{s as C};

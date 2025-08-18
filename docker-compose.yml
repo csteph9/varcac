@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  db:
+    image: mariadb:11
+    container_name: varcac-db
+    environment:
+      MARIADB_ROOT_PASSWORD: varcacpw
+      MARIADB_DATABASE: varcac
+      MARIADB_USER: varcacu
+      MARIADB_PASSWORD: varcacpw
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      # Run your schema once on first boot:
+      - ./server/db_init.sql:/docker-entrypoint-initdb.d/20-schema.sql:ro
+    ports:
+      - "3307:3306"   # <— host:container (changed from 3306 or 3307)
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -P 3307 -u root -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+
+  app:
+    build: .
+    container_name: varcac-app
+    # Provide your DB secrets at runtime (don’t bake .env into the image)
+    env_file:
+      - ./server/.env
+    environment:
+      # Ensure host/port point at the db service:
+      DB_HOST: db
+      DB_PORT: "3306"
+      NODE_ENV: production
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    # If your server/index.js loads .env via dotenv, this still works:
+    # env_file injects those variables as process.env values
+
+volumes:
+  mariadb_data:
