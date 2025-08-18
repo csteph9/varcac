@@ -12,6 +12,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ejs from 'ejs'
 const upload = multer({ dest: os.tmpdir() })
 
 
@@ -259,6 +260,7 @@ app.get('/api/plans/:id/periods', async (req, res) => {
   }
 })
 
+/*
 // CREATE plan element (must reference an existing plan)
 app.post('/api/plan-elements', async (req, res) => {
   try {
@@ -275,6 +277,7 @@ app.post('/api/plan-elements', async (req, res) => {
     res.status(400).json({ error: 'Failed to create plan element', detail: err.message })
   }
 })
+*/
 
 // LIST plans
 app.get('/api/plans', async (_req, res) => {
@@ -361,7 +364,7 @@ app.delete('/api/plans/:id', async (req, res) => {
   }
 })
 
-
+/*
 // LIST distinct element presets (reuse across plans)
 app.get('/api/plan-elements/presets', async (_req, res) => {
   try {
@@ -382,7 +385,7 @@ app.get('/api/plan-elements/presets', async (_req, res) => {
     res.status(500).json({ error: 'Failed to fetch element presets' })
   }
 })
-
+*/
 
 
 const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import)\b/
@@ -407,7 +410,7 @@ function validateFormulaSyntax(code) {
   new Function('sum','avg','min','max','count','clamp','period','participantId','planId', `"use strict"; ${body}`)
 }
 
-
+/*
 // CREATE element definition (used by AddPlanElement.vue)
 app.post('/api/element-definitions', async (req, res) => {
   const { name, scope, formula, notes } = req.body || {}
@@ -540,7 +543,6 @@ app.delete('/api/plans/:id/elements/:elementId', async (req, res) => {
 })
 
 
-
 // DELETE an element definition (supports ?force=1 to detach from all plans first)
 app.delete('/api/element-definitions/:id', async (req, res) => {
   const id = Number(req.params.id)
@@ -658,6 +660,9 @@ app.put('/api/element-definitions/:id', async (req, res) => {
     res.status(500).json({ error: 'Failed to update element', detail: e.message })
   }
 })
+
+
+*/
 
 
 app.get('/api/participants', async (_req, res) => {
@@ -1344,7 +1349,7 @@ app.get('/api/plans/:id/calculations', async (req, res) => {
   }
 })
 
-
+/*
 // CRUD: formula library
 app.get('/api/formulas', async (_req, res) => {
   const [rows] = await pool.execute(
@@ -1399,6 +1404,8 @@ app.delete('/api/formulas/:id', async (req, res) => {
   res.status(204).end()
 })
 
+
+*/
 
 // --- API: Participant payout summary (by plan, by period) ---
 app.get('/api/participants/:id/payout-summary', async (req, res) => {
@@ -1851,8 +1858,6 @@ app.get('/api/plans/:id/computations', async (req, res) => {
   }
 })
 
-
-
 // -------------------- SOURCE DATA --------------------
 
 // Utilities
@@ -2049,6 +2054,27 @@ app.delete('/api/source-data/:id', async (req, res) => {
     res.json({ ok: true, removed: r.affectedRows })
   } catch (e) {
     res.status(500).json({ error: 'Failed to delete record', detail: e.message })
+  }
+})
+
+// Bulk delete: DELETE /api/source-data  with body  { ids: [1,2,3] }
+app.delete('/api/source-data', async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isFinite) : []
+  if (!ids.length) return res.status(400).json({ error: 'ids (non-empty array) is required' })
+
+  // (Optional) guard against huge IN lists:
+  if (ids.length > 1000) return res.status(413).json({ error: 'Too many ids; send in smaller batches' })
+
+  try {
+    const placeholders = ids.map(() => '?').join(',')
+    const [r] = await pool.execute(
+      `DELETE FROM source_data WHERE id IN (${placeholders})`,
+      ids
+    )
+    return res.json({ ok: true, deleted: r.affectedRows })
+  } catch (e) {
+    console.error(e)
+    return res.status(500).json({ error: 'Failed to delete source data', detail: e.message })
   }
 })
 
@@ -2346,9 +2372,6 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
 })
 
 
-
-
-
 // Payout history for a participant, grouped by plan & period
 // GET /api/participants/:id/payout-history?planId=&from=&to=
 app.get('/api/participants/:id/payout-history', async (req, res) => {
@@ -2453,106 +2476,60 @@ app.get('/api/participants/:id/payout-history', async (req, res) => {
 
 
 // POST /api/participants/:id/comp-statement
+// --- shared helpers (same semantics as your PDF route) ---------------------
+const isYMD = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test((s || '').slice(0,10))
+const toYMD = (v) => {
+  if (!v) return ''
+  if (isYMD(v)) return v.slice(0,10)
+  const d = new Date(v)
+  if (isNaN(d)) return ''
+  const y = d.getUTCFullYear()
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(d.getUTCDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+const minDate = (a, b) => (!a ? b : !b ? a : (a <= b ? a : b))
+const maxDate = (a, b) => (!a ? b : !b ? a : (a >= b ? a : b))
+const fmtMoney = (n) => Number(n || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })
 
+function prettyTemplate(src = '') {
+  let s = String(src || '').replace(/\r\n?/g, '\n').trim()
+  s = s
+    .replace(/;(?=\S)/g, ';\n')
+    .replace(/\n\s*\/\//g, '\n//')
+    .replace(/{\s*/g, '{\n')
+    .replace(/\s*}/g, '\n}')
+    .replace(/\n{3,}/g, '\n\n')
+  const lines = s.split('\n')
+  let depth = 0
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim()
+    if (line.startsWith('}')) depth = Math.max(0, depth - 1)
+    lines[i] = '  '.repeat(depth) + line
+    if (line.endsWith('{')) depth++
+  }
+  return lines.join('\n').trim()
+}
 app.post('/api/participants/:id/comp-statement', async (req, res) => {
+
   const participantId = Number(req.params.id)
   const planIds = Array.isArray(req.body?.planIds)
     ? req.body.planIds.map(Number).filter(Number.isFinite)
     : []
+
   if (!Number.isFinite(participantId)) return res.status(400).json({ error: 'Invalid participant id' })
   if (!planIds.length) return res.status(400).json({ error: 'planIds is required (non-empty array)' })
 
-  // --- helpers --------------------------------------------------------------
-  const isYMD = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test((s || '').slice(0,10))
-  const toYMD = (v) => {
-    if (!v) return ''
-    if (isYMD(v)) return v.slice(0,10)
-    const d = new Date(v)
-    if (isNaN(d)) return ''
-    const y = d.getUTCFullYear()
-    const m = String(d.getUTCMonth() + 1).padStart(2, '0')
-    const day = String(d.getUTCDate()).padStart(2, '0')
-    return `${y}-${m}-${day}`
-  }
-  const minDate = (a, b) => (!a ? b : !b ? a : (a <= b ? a : b))
-  const maxDate = (a, b) => (!a ? b : !b ? a : (a >= b ? a : b))
-  const fmtMoney = (n) => Number(n || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })
-
-  // quick’n’clean pretty-printer for computation templates
-  function prettyTemplate(src = '') {
-    let s = String(src || '').replace(/\r\n?/g, '\n').trim()
-    s = s
-      .replace(/;(?=\S)/g, ';\n')
-      .replace(/\n\s*\/\//g, '\n//')
-      .replace(/{\s*/g, '{\n')
-      .replace(/\s*}/g, '\n}')
-      .replace(/\n{3,}/g, '\n\n')
-    const lines = s.split('\n')
-    let depth = 0
-    for (let i = 0; i < lines.length; i++) {
-      let line = lines[i].trim()
-      if (line.startsWith('}')) depth = Math.max(0, depth - 1)
-      lines[i] = '  '.repeat(depth) + line
-      if (line.endsWith('{')) depth++
-    }
-    return lines.join('\n').trim()
-  }
-
-  // Simple table drawer (PDFKit)
-  function drawTable(doc, startY, { headers, rows, widths, aligns }) {
-    const marginL = doc.page.margins.left
-    const marginR = doc.page.width - doc.page.margins.right
-    const availW = marginR - marginL
-    const x0 = marginL
-    const padX = 6, padY = 4
-    const lineColor = '#e5e5e5', headerBg = '#f5f5f5', bodyText = '#000', headerText = '#333'
-    const fontSize = 10
-    function ensurePageSpace(h) {
-      const bottom = doc.page.height - doc.page.margins.bottom
-      if (startY + h > bottom) { doc.addPage(); startY = doc.page.margins.top }
-    }
-    function cellHeight(text, width, isHeader=false) {
-      const txt = (text == null || text === '') ? '—' : String(text)
-      doc.fontSize(fontSize).font(isHeader ? 'Helvetica-Bold' : 'Helvetica')
-      return doc.heightOfString(txt, { width: width - padX*2 }) + padY*2
-    }
-    function rowHeight(cells, isHeader=false) {
-      let h = 0; for (let i=0;i<cells.length;i++) h = Math.max(h, cellHeight(cells[i], widths[i], isHeader)); return h
-    }
-    function drawRow(cells, isHeader=false) {
-      const h = rowHeight(cells, isHeader); ensurePageSpace(h)
-      if (isHeader) doc.save().rect(x0, startY, availW, h).fill(headerBg).restore()
-      let x = x0
-      for (let i=0;i<cells.length;i++) {
-        const w = widths[i]
-        doc.save().strokeColor(lineColor).lineWidth(0.5)
-          .moveTo(x, startY).lineTo(x, startY+h).stroke().restore()
-        const txt = (cells[i] == null || cells[i] === '') ? '—' : String(cells[i])
-        doc.fontSize(fontSize).font(isHeader ? 'Helvetica-Bold' : 'Helvetica').fillColor(isHeader ? headerText : bodyText)
-        doc.text(txt, x + padX, startY + padY, { width: w - padX*2, align: aligns?.[i] || 'left' })
-        x += w
-      }
-      doc.save().strokeColor(lineColor).lineWidth(0.5)
-        .moveTo(x0 + availW, startY).lineTo(x0 + availW, startY + h).stroke().restore()
-      doc.save().strokeColor(lineColor).lineWidth(0.5)
-        .moveTo(x0, startY + h).lineTo(x0 + availW, startY + h).stroke().restore()
-      startY += h
-    }
-    drawRow(headers, true)
-    for (const r of rows) drawRow(r, false)
-    return startY
-  }
-
   const conn = await pool.getConnection()
   try {
-    // participant
+    // --- Participant
     const [[pt]] = await conn.execute(
       `SELECT id, first_name AS firstName, last_name AS lastName, email, employee_id AS employeeId
          FROM plan_participant WHERE id = ?`,
       [participantId]
     )
 
-    // verify plans (accept plan_id or participant_plan.id)
+    // --- Verify plans (accept plan_id or participant_plan.id)
     let validPlanIds = []
     {
       const [attached] = await conn.execute(
@@ -2560,8 +2537,9 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
           WHERE participant_id = ? AND plan_id IN (${planIds.map(() => '?').join(',')})`,
         [participantId, ...planIds]
       )
-      if (attached.length) validPlanIds = attached.map(r => r.planId)
-      else {
+      if (attached.length) {
+        validPlanIds = attached.map(r => r.planId)
+      } else {
         const [byJunc] = await conn.execute(
           `SELECT plan_id AS planId FROM participant_plan
             WHERE participant_id = ? AND id IN (${planIds.map(() => '?').join(',')})`,
@@ -2575,7 +2553,7 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
       return res.status(404).json({ error: 'Participant is not attached to any of the selected plans.' })
     }
 
-    // plans for headers
+    // --- Plans (headers)
     const [plans] = await conn.execute(
       `SELECT id, name, version, effective_start AS effectiveStart, effective_end AS effectiveEnd
          FROM comp_plan WHERE id IN (${validPlanIds.map(() => '?').join(',')})`,
@@ -2583,7 +2561,7 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
     )
     const planById = Object.fromEntries(plans.map(p => [p.id, p]))
 
-    // payouts (all labels/periods)
+    // --- Payouts (all labels/periods)
     const [payouts] = await conn.execute(
       `SELECT plan_id AS planId,
               period_label  AS periodLabel,
@@ -2600,27 +2578,33 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
       [participantId, ...validPlanIds]
     )
 
-    // group: plan -> period label (or per-window key if unlabeled)
-    const groupsByPlan = new Map()
+    // --- Group payouts: plan -> label/window key
+    const groupsByPlanMap = new Map()
     for (const row of payouts) {
       const pid = row.planId
-      if (!groupsByPlan.has(pid)) groupsByPlan.set(pid, new Map())
+      if (!groupsByPlanMap.has(pid)) groupsByPlanMap.set(pid, new Map())
       const rowStart = toYMD(row.periodStart), rowEnd = toYMD(row.periodEnd), rowDue = toYMD(row.dueDate)
       const cleanLabel = (row.periodLabel && String(row.periodLabel).trim()) || null
       const key = cleanLabel || `${rowStart} -> ${rowEnd}`
-      let g = groupsByPlan.get(pid).get(key)
+      let g = groupsByPlanMap.get(pid).get(key)
       if (!g) {
-        g = { label: cleanLabel || key, start: rowStart, end: rowEnd, due: rowDue, total: 0, items: [] }
-        groupsByPlan.get(pid).set(key, g)
+        g = { key, label: cleanLabel || key, start: rowStart, end: rowEnd, due: rowDue, total: 0, items: [] }
+        groupsByPlanMap.get(pid).set(key, g)
       } else {
-        g.start = minDate(g.start, rowStart); g.end = maxDate(g.end, rowEnd); g.due = maxDate(g.due, rowDue)
+        g.start = minDate(g.start, rowStart)
+        g.end   = maxDate(g.end, rowEnd)
+        g.due   = maxDate(g.due, rowDue)
       }
       g.total += Number(row.amount || 0)
       g.items.push({ outputLabel: row.outputLabel, amount: Number(row.amount || 0), createdAt: row.createdAt })
     }
+    // simple object form for EJS
+    const groupsByPlanId = Object.fromEntries(
+      [...groupsByPlanMap.entries()].map(([planId, mp]) => [planId, [...mp.values()]])
+    )
 
-    // computations attached to selected plans (for Appendix)
-    let compsByPlan = new Map()
+    // --- Computations (Appendix)
+    let appendix = []
     try {
       const [comps] = await conn.execute(
         `SELECT pc.plan_id AS planId, c.id, c.name, c.scope, c.template
@@ -2630,28 +2614,25 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
           ORDER BY pc.plan_id ASC, c.name ASC`,
         validPlanIds
       )
-      for (const r of comps) {
-        if (!compsByPlan.has(r.planId)) compsByPlan.set(r.planId, [])
-        compsByPlan.get(r.planId).push({
-          id: r.id,
-          name: r.name,
-          scope: (r.scope || '').toLowerCase() === 'plan' ? 'Entire Plan Window' : 'Per Payout Period',
-          template: prettyTemplate(r.template || '')
-        })
-      }
+      appendix = comps.map(r => ({
+        planId: r.planId,
+        id: r.id,
+        name: r.name,
+        scope: (r.scope || '').toLowerCase() === 'plan' ? 'Entire Plan Window' : 'Per Payout Period',
+        template: prettyTemplate(r.template || '')
+      }))
     } catch {
-      compsByPlan = new Map()
+      appendix = []
     }
 
-    // ---- Direct reports (for roll-up) -------------------------------------
+    // --- Manager Roll-up scope (manager + direct reports)
     const [drRows] = await conn.execute(
       `SELECT id FROM plan_participant WHERE manager_participant_id = ?`,
       [participantId]
     )
     const directReportIds = drRows.map(r => r.id)
-    const participantScopeIds = [participantId, ...directReportIds] // manager + DRs
+    const participantScopeIds = [participantId, ...directReportIds]
 
-    // helper: source data within window (manager + DRs), with origin tagging
     async function getSourceRows(startDate, endDate) {
       if (!startDate || !endDate) return []
       const placeholders = participantScopeIds.map(() => '?').join(',')
@@ -2670,197 +2651,79 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
           ORDER BY metric_date ASC, id ASC`,
         params
       )
-      // annotate origin
       return rows.map(r => ({
         ...r,
         origin: (r.participantId === participantId) ? 'Direct' : `Roll-up (${r.participantId})`
       }))
     }
 
-    // --- PDF ---------------------------------------------------------------
-    const now = new Date()
-    const filename = `CompStatement_${participantId}_${toYMD(now)}.pdf`
-    res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-    const doc = new PDFDocument({ size: 'LETTER', margin: 50 })
-    doc.pipe(res)
-
-    // layout helpers (fix drifting x)
-    const LEFT = () => doc.page.margins.left
-    const resetX = () => { doc.x = LEFT() }
-    const hr = () => {
-      resetX()
-      doc.moveDown(0.4)
-      doc.save().strokeColor('#e5e5e5').lineWidth(1)
-        .moveTo(LEFT(), doc.y).lineTo(doc.page.width - doc.page.margins.right, doc.y).stroke().restore()
-      doc.moveDown(0.2)
-    }
-    function headingPlan(title, sublines = []) {
-      doc.moveDown(0.8); resetX()
-      doc.fontSize(14).fillColor('black').text(title, LEFT(), doc.y)
-      if (sublines.length) {
-        doc.fontSize(10).fillColor('#666')
-        for (const s of sublines) { resetX(); doc.text(s, LEFT(), doc.y) }
-        doc.fillColor('black')
-      }
-      doc.moveDown(0.4)
-    }
-    function headingPeriod(label, windowTxt, dueTxt) {
-      doc.moveDown(0.6); resetX()
-      doc.fontSize(12).fillColor('black').text(label, LEFT(), doc.y)
-      doc.fontSize(10).fillColor('#666')
-      if (windowTxt) { resetX(); doc.text(windowTxt, LEFT(), doc.y) }
-      if (dueTxt)    { resetX(); doc.text(dueTxt, LEFT(), doc.y) }
-      doc.fillColor('black').moveDown(0.25)
-    }
-    const _drawTable = drawTable
-    function drawTableReset(docRef, startY, cfg) { const newY = _drawTable(docRef, startY, cfg); resetX(); return newY }
-
-    // header
-    resetX()
-    doc.fontSize(18).text('Compensation Statement', LEFT(), doc.y)
-    doc.moveDown(0.5); resetX()
-    doc.fontSize(10).fillColor('#666').text(`Generated: ${now.toLocaleString()}`, LEFT(), doc.y)
-    doc.fillColor('black').moveDown(1)
-
-    // participant
-    resetX()
-    doc.fontSize(12).text(`${pt?.firstName || ''} ${pt?.lastName || ''}  (ID: ${pt?.id || participantId})`, LEFT(), doc.y)
-    if (pt?.employeeId) { resetX(); doc.text(`Employee ID: ${pt.employeeId}`, LEFT(), doc.y) }
-    if (pt?.email)      { resetX(); doc.text(`Email: ${pt.email}`, LEFT(), doc.y) }
-    doc.moveDown(0.75)
-
-    // per plan
-    for (const planId of validPlanIds) {
-      const plan = planById[planId]
-      const title = plan ? `${plan.name} (v${plan.version})` : `Plan #${planId}`
-
-      headingPlan(title, [
-        `Window: ${toYMD(plan?.effectiveStart)} -> ${toYMD(plan?.effectiveEnd)}`
-      ])
-
-      const planGroups = Array.from((groupsByPlan.get(planId) || new Map()).values())
-      if (!planGroups.length) {
-        resetX()
-        doc.fontSize(10).fillColor('#888').text('(No payouts found for this plan)', LEFT(), doc.y)
-        doc.fillColor('black').moveDown(0.25)
-        continue
-      }
-
-      let planTotal = 0
-
-      for (const g of planGroups) {
-        headingPeriod(g.label, `Window: ${g.start} -> ${g.end}`, g.due ? `Due: ${g.due}` : '')
-
-        // Payouts table
-        {
-          const availW = doc.page.width - doc.page.margins.left - doc.page.margins.right
-          const widths = [availW * 0.5, availW * 0.2, availW * 0.3]
-          const rows = (g.items || []).map(ln => [
-            ln.outputLabel || '—',
-            fmtMoney(ln.amount),
-            new Date(ln.createdAt).toLocaleString()
-          ])
-          doc.y = drawTableReset(doc, doc.y, {
-            headers: ['Computation Applied', 'Amount', 'Created At'],
-            rows,
-            widths,
-            aligns: ['left', 'right', 'left']
-          })
-          const subRows = [[ 'TOTAL', fmtMoney(g.total), '' ]]
-          doc.y = drawTableReset(doc, doc.y, {
-            headers: ['','',''],
-            rows: subRows,
-            widths,
-            aligns: ['right', 'right', 'left']
-          })
-          planTotal += g.total
+    // Build a per-window cache for source rows keyed by group.key (label or date window)
+    const sourceDataByWindow = {}
+    for (const pid of validPlanIds) {
+      const groups = groupsByPlanId[pid] || []
+      for (const g of groups) {
+        const cacheKey = g.key
+        if (!sourceDataByWindow[cacheKey]) {
+          sourceDataByWindow[cacheKey] = await getSourceRows(g.start, g.end)
         }
-
-        doc.moveDown(0.3)
-
-        // Source data table (manager + direct reports), with Origin tag
-        {
-          const src = await getSourceRows(g.start, g.end)
-          const availW = doc.page.width - doc.page.margins.left - doc.page.margins.right
-          const widths = [availW * 0.16, availW * 0.20, availW * 0.16, availW * 0.18, availW * 0.30]
-          const rows = src.map(s => [
-            toYMD(s.date),
-            s.label || '—',
-            fmtMoney(s.value),
-            s.origin,                 // "Direct" or "Roll-up (ID)"
-            s.description || ''
-          ])
-          doc.y = drawTableReset(doc, doc.y, {
-            headers: ['Date', 'Label', 'Value', 'Origin', 'Description'],
-            rows,
-            widths,
-            aligns: ['left', 'left', 'right', 'left', 'left']
-          })
-        }
-
-        hr()
-        if (doc.y > doc.page.height - doc.page.margins.bottom - 40) doc.addPage()
-      }
-
-      // plan total
-      doc.moveDown(0.6); resetX()
-      doc.fontSize(12).text(`Plan Total: ${fmtMoney(planTotal)}`, LEFT(), doc.y)
-      doc.moveDown(0.4)
-    }
-
-    // ---------------- Appendix: Computation Formulas -----------------------
-    const hasAnyComps = validPlanIds.some(pid => (compsByPlan.get(pid) || []).length)
-    if (hasAnyComps) {
-      doc.addPage()
-      resetX()
-      doc.fontSize(16).text('Appendix: Computation Formulas', LEFT(), doc.y)
-      doc.moveDown(0.5)
-
-      for (const planId of validPlanIds) {
-        const comps = compsByPlan.get(planId) || []
-        if (!comps.length) continue
-
-        const plan = planById[planId]
-        const title = plan ? `${plan.name} (v${plan.version})` : `Plan #${planId}`
-        doc.moveDown(0.6); resetX()
-        doc.fontSize(13).text(title, LEFT(), doc.y)
-        doc.moveDown(0.2)
-
-        for (const c of comps) {
-          resetX()
-          doc.fontSize(11).fillColor('black').text(`${c.name} — ${c.scope}`, LEFT(), doc.y)
-          doc.moveDown(0.1)
-
-          const blockW = doc.page.width - doc.page.margins.left - doc.page.margins.right
-          const code = c.template && c.template.length ? c.template : '// (empty template)'
-          const h = doc.heightOfString(code, { width: blockW - 8, font: 'Courier', fontSize: 9 })
-          const bottom = doc.page.height - doc.page.margins.bottom
-          if (doc.y + h + 8 > bottom) doc.addPage()
-
-          doc.save().rect(LEFT(), doc.y - 2, blockW, h + 6).fill('#f8f9fa').restore()
-          resetX()
-          doc.font('Courier').fontSize(9).fillColor('#111').text(code, LEFT() + 4, doc.y, { width: blockW - 8 })
-          doc.font('Helvetica').fillColor('black')
-          doc.moveDown(0.4)
-        }
-
-        hr()
       }
     }
 
-    doc.end()
+    // -----------------------------------------------------------------------
+    // Load EJS template from MariaDB (settings.setting_name = 'comp_plan_template_ejs')
+    // Honors an optional body override __TEMP_INLINE_TEMPLATE__ for quick testing
+    let templateString = ''
+    if (typeof req.body?.__TEMP_INLINE_TEMPLATE__ === 'string' && req.body.__TEMP_INLINE_TEMPLATE__.trim()) {
+      templateString = req.body.__TEMP_INLINE_TEMPLATE__
+    } else {
+      const [tplRows] = await conn.execute(
+        `SELECT setting_value
+          FROM settings
+          WHERE setting_name = ?
+          ORDER BY id DESC
+          LIMIT 1`,
+        ['comp_plan_template_ejs']
+      )
+      templateString = (tplRows?.[0]?.setting_value || '').toString()
+    }
+
+    // If there’s still no template, either error out or fall back to a tiny placeholder:
+    if (!templateString.trim()) {
+      // Option A: hard error (recommended so you notice misconfig)
+      return res.status(500).json({
+        error: "Comp plan template not configured",
+        detail: "Add a row in settings with setting_name='comp_plan_template_ejs'."
+      })
+
+      // Option B: fallback HTML (uncomment to use)
+      // templateString = `<!DOCTYPE html><html><body><p>Template not found. Please load from DB.</p></body></html>`
+    }
+    // -----------------------------------------------------------------------
+
+    const html = await ejs.render(templateString, {
+      // data payload
+      generatedAt: new Date().toLocaleString(),
+      participant: pt || { id: participantId },
+      plans,
+      groupsByPlanId,      // { [planId]: [{ key,label,start,end,due,total,items[] }, ...] }
+      sourceDataByWindow,  // { [groupKey]: [ {date,label,value,origin,description}, ... ] }
+      appendix,
+
+      // helpers available in EJS
+      toYMD,
+      fmtMoney
+    }, { async: true })
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8')
+    return res.status(200).send(html)
+
   } catch (e) {
     console.error(e)
-    if (!res.headersSent) res.status(500).json({ error: 'Failed to generate statement', detail: e.message })
+    if (!res.headersSent) res.status(500).json({ error: 'Failed to render statement', detail: e.message })
   } finally {
     try { conn.release() } catch {}
   }
 })
-
-
-
-
 
 
 app.get('/api/plans/:id/payout-run-summary', async (req, res) => {
@@ -2894,15 +2757,7 @@ app.get('/api/plans/:id/payout-run-summary', async (req, res) => {
 })
 
 
-
-
-
-
-
 // GET /api/dashboard
-
-
-
 app.get('/api/dashboard', async (req, res) => {
   const conn = await pool.getConnection()
   try {
@@ -3000,13 +2855,11 @@ app.get('/api/dashboard', async (req, res) => {
 })
 
 
-
 // ---------- Admin: Backup ----------
-
 app.get('/api/admin/backup', async (req, res) => {
 
   const DB_HOST = process.env.DB_HOST
-  const DB_PORT = Number(process.env.DB_PORT || 3306)
+  const DB_PORT = Number(process.env.DB_PORT)
   const DB_USER = process.env.DB_USER
   const DB_PASSWORD = process.env.DB_PASSWORD
   const DB_NAME = process.env.DB_NAME
@@ -3053,7 +2906,6 @@ app.get('/api/admin/backup', async (req, res) => {
 })
 
 
-
 // ---------- Admin: Restore ----------
 // ---------- Admin: Restore (disable FK checks during import) ----------
 app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
@@ -3062,7 +2914,7 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
   if (!req.file?.path)   return res.status(400).json({ error: 'Missing dump file' })
 
   const DB_HOST = process.env.DB_HOST
-  const DB_PORT = Number(process.env.DB_PORT || 3306)
+  const DB_PORT = Number(process.env.DB_PORT)
   const DB_USER = process.env.DB_USER
   const DB_PASSWORD = process.env.DB_PASSWORD
   const DB_NAME = process.env.DB_NAME
@@ -3118,5 +2970,75 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
     res.status(500).json({ error: 'Restore failed', detail: e.message })
   } finally {
     try { fs.unlinkSync(dumpPath) } catch {}
+  }
+})
+
+
+// READ template by setting_name
+app.get('/api/settings/:name', async (req, res) => {
+  const name = String(req.params.name || '').trim()
+  if (!name) return res.status(400).json({ error: 'Missing setting name' })
+
+  try {
+    const [rows] = await pool.execute(
+      `SELECT id, setting_name, setting_value
+         FROM settings
+        WHERE setting_name = ?
+        ORDER BY id DESC
+        LIMIT 1`,
+      [name]
+    )
+    if (!rows.length) return res.status(204).send() // not found (empty), client can seed a default
+    const row = rows[0]
+    return res.json({
+      id: row.id,
+      setting_name: row.setting_name,
+      setting_value: row.setting_value,
+    })
+  } catch (e) {
+    console.error(e)
+    return res.status(500).json({ error: 'Failed to read setting', detail: e.message })
+  }
+})
+
+// UPSERT (create-or-update) by setting_name
+app.put('/api/settings/:name', async (req, res) => {
+  const name = String(req.params.name || '').trim()
+  if (!name) return res.status(400).json({ error: 'Missing setting name' })
+
+  // Accept strings only; coerce others (null/undefined become empty string)
+  const raw = req.body?.setting_value
+  const value = typeof raw === 'string' ? raw : String(raw ?? '')
+
+  try {
+    // Does a row already exist? (no unique index, so grab the most recent)
+    const [rows] = await pool.execute(
+      `SELECT id FROM settings
+        WHERE setting_name = ?
+        ORDER BY id DESC
+        LIMIT 1`,
+      [name]
+    )
+
+    if (rows.length) {
+      const id = rows[0].id
+      const [r] = await pool.execute(
+        `UPDATE settings
+            SET setting_value = ?
+          WHERE id = ?`,
+        [value, id]
+      )
+      return res.json({ ok: true, updated: r.affectedRows, id })
+    } else {
+      const [r] = await pool.execute(
+        `INSERT INTO settings (setting_name, setting_value)
+              VALUES (?, ?)`,
+        [name, value]
+      )
+      return res.json({ ok: true, insertedId: r.insertId })
+    }
+  } catch (e) {
+    console.error(e)
+    return res.status(500).json({ error: 'Failed to save setting', detail: e.message })
   }
 })
