@@ -65,7 +65,7 @@ https://www.docker.com/products/docker-desktop/
 docker compose build --no-cache
 docker compose up -d
 ```
-Note: ignore if you see  ✘ Container varcac-db: Error, flip to your Docker Desktop and plaay your varcac-app container.
+Note: ignore if you see  ✘ Container varcac-db: Error, flip to your Docker Desktop and play your varcac-app container.
 
 **Open up Docker Desktop, and inspect your container. If it's not running, click the play button on both the mariadb container and the varcac-app container.**
 **That should be it!**
