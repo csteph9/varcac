@@ -56,9 +56,11 @@ https://www.docker.com/products/docker-desktop/
 # Get VarCAC. Download it from right here on github!
 # After downloading, unzip the file where you will be running VarCAC (on your desktop, or a sub-folder)
 
-# Build the docker images that you'll be turning on.
+# Next, we'll build the docker images that you'll be turning on.
+
 # You'll need to get into your termainal for this, and navigate to the folder where you saved VarCAC.
 # Run the following commands at your terminal prompt while being in the right folder:
+
 docker compose build --no-cache
 docker compose up -d
 
@@ -66,6 +68,10 @@ docker compose up -d
 # That should be it!
 # Open up VarCAC in a browser window:
 http://localhost:3001
+
+#Struggle with any of that? Check out the youtube video here:
+http://youtube.com
+
 ```
 ---
 
