@@ -59,7 +59,7 @@ https://www.docker.com/products/docker-desktop/
 
 **Next, we'll build the docker images that you'll be turning on.**
 
-**You'll need to get into your termainal for this, and navigate to the folder where you saved VarCAC.**
+**You'll need to get into your termainal for this, and navigate to the folder where you extracted the VarCAC zip file.**
 **Run the following commands at your terminal prompt while being in the right folder:**
 ```
 docker compose build --no-cache
