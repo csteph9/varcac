@@ -1,0 +1,1 @@
+import{y as o,z as t}from"./index-C5PjdH1u.js";const r=o({name:"CForm",props:{validated:Boolean},setup(e,{slots:a}){return()=>t("form",{class:[{"was-validated":e.validated}]},a.default&&a.default())}});export{r as C};
