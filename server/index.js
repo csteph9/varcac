@@ -19,19 +19,13 @@ import os from 'os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ejs from 'ejs'
+
 const upload = multer({ dest: os.tmpdir() })
-
-
-
-
-
 const lodashTemplate = _.template
-
-
 const app = express();
 const PORT = process.env.PORT || 3001;
-
 const parser = new Parser({ operators: { logical: true, comparison: true, ternary: true } })
+
 parser.functions.clamp = (x, lo, hi) => Math.min(Math.max(Number(x), Number(lo)), Number(hi))
 parser.functions.min = Math.min
 parser.functions.max = Math.max
@@ -68,8 +62,6 @@ app.use((req, _res, next) => {
   next();
 });
 
-
-
 const __filename = fileURLToPath(import.meta.url)
 const __dirname  = path.dirname(__filename)
 const publicDir  = path.join(__dirname, 'public')
@@ -77,7 +69,6 @@ app.use(express.static(publicDir))
 app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'))
 })
-
 
 app.get('/api/me', (req, res) => {
   res.json({ user: req.session.user });
