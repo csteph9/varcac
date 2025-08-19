@@ -1,3 +1,9 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ * Copyright (c) 2025 Caleb Stephens (csteph9@gmail.com)
+ * See the LICENSE file in the project root for license information.
+ */
+
 import express from 'express';
 import session from 'express-session';
 import cors from 'cors';
