@@ -12,7 +12,7 @@ services:
       # Run your schema once on first boot:
       - ./server/db_init.sql:/docker-entrypoint-initdb.d/20-schema.sql:ro
     ports:
-      - "3307:3306"   # <— host:container (changed from 3306 or 3307)
+      - "127.0.0.1:3307:3306"   # <— host:container (changed from 3306 or 3307)
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -P 3307 -u root -p$${MARIADB_ROOT_PASSWORD} --silent"]
       interval: 5s
