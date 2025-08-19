@@ -1,3 +1,7 @@
+-- SPDX-License-Identifier: AGPL-3.0-or-later
+-- Copyright (c) 2025 Caleb Stephens (csteph9@gmail.com)
+-- See the LICENSE file in the project root for license information.
+
 CREATE DATABASE IF NOT EXISTS varcac
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE varcac;
