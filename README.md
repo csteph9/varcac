@@ -47,12 +47,13 @@
 ---
 
 ## Quick start (Docker)
-**Prereqs:** Docker Desktop (or Docker Engine + Compose).
+**Prereqs:** Docker Desktop.
 
-```bash
+
 # Download and Install Docker Desktop (you will need at least a free personal account)
+```
 https://www.docker.com/products/docker-desktop/
-
+```
 # Get VarCAC. Download it from right here on github!
 # After downloading, unzip the file where you will be running VarCAC (on your desktop, or a sub-folder)
 
@@ -60,18 +61,15 @@ https://www.docker.com/products/docker-desktop/
 
 # You'll need to get into your termainal for this, and navigate to the folder where you saved VarCAC.
 # Run the following commands at your terminal prompt while being in the right folder:
-
+```
 docker compose build --no-cache
 docker compose up -d
-
+```
 # Open up Docker Desktop, and inspect your container. If it's not running, click the play button on both the mariadb container and the varcac-app container.
 # That should be it!
 # Open up VarCAC in a browser window:
+```
 http://localhost:3001
-
-#Struggle with any of that? Check out the youtube video here:
-http://youtube.com
-
 ```
 ---
 
