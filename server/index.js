@@ -19,13 +19,15 @@ import os from 'os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ejs from 'ejs'
-
 const upload = multer({ dest: os.tmpdir() })
+
 const lodashTemplate = _.template
+
+
 const app = express();
 const PORT = process.env.PORT || 3001;
-const parser = new Parser({ operators: { logical: true, comparison: true, ternary: true } })
 
+const parser = new Parser({ operators: { logical: true, comparison: true, ternary: true } })
 parser.functions.clamp = (x, lo, hi) => Math.min(Math.max(Number(x), Number(lo)), Number(hi))
 parser.functions.min = Math.min
 parser.functions.max = Math.max
@@ -62,6 +64,8 @@ app.use((req, _res, next) => {
   next();
 });
 
+
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname  = path.dirname(__filename)
 const publicDir  = path.join(__dirname, 'public')
@@ -69,6 +73,7 @@ app.use(express.static(publicDir))
 app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'))
 })
+
 
 app.get('/api/me', (req, res) => {
   res.json({ user: req.session.user });
@@ -257,25 +262,6 @@ app.get('/api/plans/:id/periods', async (req, res) => {
   }
 })
 
-/*
-// CREATE plan element (must reference an existing plan)
-app.post('/api/plan-elements', async (req, res) => {
-  try {
-    const { planId, elementType, name, unit, rate = null, formula = null, notes = null } = req.body
-    const [result] = await pool.execute(
-      `INSERT INTO plan_element
-       (plan_id, element_type, name, unit, rate, formula, notes)
-       VALUES (:planId, :elementType, :name, :unit, :rate, :formula, :notes)`,
-      { planId, elementType, name, unit, rate, formula, notes }
-    )
-    res.status(201).json({ id: result.insertId })
-  } catch (err) {
-    console.error(err)
-    res.status(400).json({ error: 'Failed to create plan element', detail: err.message })
-  }
-})
-*/
-
 // LIST plans
 app.get('/api/plans', async (_req, res) => {
   try {
@@ -362,7 +348,6 @@ app.delete('/api/plans/:id', async (req, res) => {
 })
 
 
-
 const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import)\b/
 const nameRegex = /^[A-Za-z_][A-Za-z0-9_]*$/
 
@@ -384,6 +369,7 @@ function validateFormulaSyntax(code) {
   // eslint-disable-next-line no-new-func
   new Function('sum','avg','min','max','count','clamp','period','participantId','planId', `"use strict"; ${body}`)
 }
+
 
 app.get('/api/participants', async (_req, res) => {
   try {
@@ -1069,8 +1055,6 @@ app.get('/api/plans/:id/calculations', async (req, res) => {
   }
 })
 
-
-
 // --- API: Participant payout summary (by plan, by period) ---
 app.get('/api/participants/:id/payout-summary', async (req, res) => {
   const participantId = Number(req.params.id)
@@ -1271,14 +1255,13 @@ app.put('/api/participants/:id', async (req, res) => {
 
   await conn.execute(
     `UPDATE plan_participant
-       SET first_name = ?, last_name = ?, email = ?, employee_id = ?,
+       SET first_name = ?, last_name = ?, email = ?,
            manager_participant_id = ?, effective_start = ?, effective_end = ?, updated_at = NOW()
      WHERE id = ?`,
     [
       firstName ?? null,
       lastName ?? null,
       email ?? null,
-      employeeId ?? null,
       managerParticipantId ?? null,
       toDate(effectiveStart),
       toDate(effectiveEnd),
