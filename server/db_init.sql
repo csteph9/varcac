@@ -43,7 +43,7 @@ CREATE TABLE `comp_plan` (
   `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   KEY `idx_plan_name` (`name`)
-) ENGINE=InnoDB AUTO_INCREMENT=6 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -62,7 +62,7 @@ CREATE TABLE `computation_definition` (
   `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_computation_name` (`name`)
-) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -82,7 +82,7 @@ CREATE TABLE `element_definition` (
   `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_element_definition_name` (`name`)
-) ENGINE=InnoDB AUTO_INCREMENT=4 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -155,7 +155,7 @@ CREATE TABLE `participant_payout_history` (
   KEY `idx_pph_plan_part` (`plan_id`,`participant_id`),
   KEY `idx_pph_period` (`period_start`,`period_end`),
   KEY `idx_pph_output_label` (`output_label`)
-) ENGINE=InnoDB AUTO_INCREMENT=683 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -179,7 +179,7 @@ CREATE TABLE `participant_plan` (
   KEY `idx_pp_plan` (`plan_id`),
   CONSTRAINT `fk_pp_participant` FOREIGN KEY (`participant_id`) REFERENCES `plan_participant` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_pp_plan` FOREIGN KEY (`plan_id`) REFERENCES `comp_plan` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=8 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -292,7 +292,7 @@ CREATE TABLE `plan_participant` (
   KEY `idx_employee_id` (`employee_id`),
   KEY `fk_participant_manager` (`manager_participant_id`),
   CONSTRAINT `fk_participant_manager` FOREIGN KEY (`manager_participant_id`) REFERENCES `plan_participant` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=7 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -314,7 +314,7 @@ CREATE TABLE `plan_payout_period` (
   KEY `idx_ppp_plan_start` (`plan_id`,`start_date`),
   KEY `idx_ppp_plan_end` (`plan_id`,`end_date`),
   CONSTRAINT `fk_ppp_plan` FOREIGN KEY (`plan_id`) REFERENCES `comp_plan` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=21 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -329,7 +329,7 @@ CREATE TABLE `settings` (
   `setting_name` varchar(100) DEFAULT NULL,
   `setting_value` longtext DEFAULT NULL,
   PRIMARY KEY (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 LOCK TABLES `settings` WRITE;
@@ -360,7 +360,7 @@ CREATE TABLE `source_data` (
   KEY `idx_sd_participant` (`participant_id`),
   KEY `idx_sd_label` (`label`),
   KEY `idx_sd_date` (`metric_date`)
-) ENGINE=InnoDB AUTO_INCREMENT=418 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
