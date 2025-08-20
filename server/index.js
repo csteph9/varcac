@@ -44,7 +44,7 @@ app.use(cors({
 
 app.use(
   session({
-    secret: 'dev-only-change-me',
+    secret: 'for-use-with-local-docker-only',
     resave: false,
     saveUninitialized: false,
     cookie: { maxAge: 1000 * 60 * 60 * 8 }, // 8h
@@ -84,8 +84,8 @@ app.get('/api/users', (_req, res) => {
   res.json([{ id: 1, username: 'admin', role: 'admin' }]);
 });
 
-app.listen(PORT,"127.0.0.1", () => {
-  console.log(`API running on http://localhost:${PORT}`);
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`API running on http://127.0.0.1:${PORT}`);
 });
 
 
@@ -2554,7 +2554,6 @@ app.get('/api/admin/backup', async (req, res) => {
 
 
 // ---------- Admin: Restore ----------
-// ---------- Admin: Restore (disable FK checks during import) ----------
 app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
   const confirm = req.body?.confirm
   if (confirm !== 'ERASE') return res.status(400).json({ error: 'Confirmation required: type ERASE' })
@@ -2571,7 +2570,6 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
   try {
     const args = ['-h', DB_HOST, '-P', DB_PORT, '-u', DB_USER]
     if (DB_PASSWORD) args.push(`-p${DB_PASSWORD}`)
-    // Use target DB; your dump includes DROP TABLE so this is fine
     args.push(DB_NAME)
 
     await new Promise((resolve, reject) => {
@@ -2584,7 +2582,6 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
       mysql.stdin.write([
         'SET FOREIGN_KEY_CHECKS=0;',
         'SET UNIQUE_CHECKS=0;',
-        // optional: avoid noisy warnings on recreate
         'SET SQL_NOTES=0;',
         '\n'
       ].join('\n'))
@@ -2610,6 +2607,40 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
         else reject(new Error(stderr || `mysql exited with ${code}`))
       })
     })
+
+    // ---- NEW: record the restore in settings ----
+    try {
+      // use the original uploaded file name, not Multer's temp filename
+      const fileName = (() => {
+        const orig = req.file?.originalname
+        if (typeof orig === 'string' && orig.trim()) return path.basename(orig)
+        return path.basename(dumpPath)
+      })()
+
+      const now = new Date()
+      const pad = n => String(n).padStart(2, '0')
+      const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+      const value = `Current Data Restored from ${fileName} at ${ts}.`
+
+      const [rows] = await pool.execute(
+        'SELECT id FROM settings WHERE setting_name = ? ORDER BY id DESC LIMIT 1',
+        ['current_restore']
+      )
+      if (rows.length) {
+        await pool.execute(
+          'UPDATE settings SET setting_value = ? WHERE id = ?',
+          [value, rows[0].id]
+        )
+      } else {
+        await pool.execute(
+          'INSERT INTO settings (setting_name, setting_value) VALUES (?, ?)',
+          ['current_restore', value]
+        )
+      }
+    } catch (e) {
+      console.warn('Restore completed but failed to write current_restore setting:', e.message)
+    }
+    // --------------------------------------------
 
     res.json({ ok: true })
   } catch (e) {
