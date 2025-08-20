@@ -84,7 +84,7 @@ app.get('/api/users', (_req, res) => {
   res.json([{ id: 1, username: 'admin', role: 'admin' }]);
 });
 
-app.listen(PORT, '127.0.0.1', () => {
+app.listen(PORT, () => {
   console.log(`API running on http://127.0.0.1:${PORT}`);
 });
 
