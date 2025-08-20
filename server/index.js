@@ -85,7 +85,7 @@ app.get('/api/users', (_req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`API running on http://127.0.0.1:${PORT}`);
+  console.log(`API running on http://localhost:${PORT}`);
 });
 
 
