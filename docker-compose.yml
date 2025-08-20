@@ -1,43 +1,47 @@
-version: "3.9"
-
 services:
   db:
-    image: mariadb:11
+    image: mariadb:11.4
     container_name: varcac-db
+    restart: unless-stopped
     environment:
       MARIADB_ROOT_PASSWORD: varcacpw
       MARIADB_DATABASE: varcac
       MARIADB_USER: varcacu
       MARIADB_PASSWORD: varcacpw
+      # optional but recommended charset/collation
+      MARIADB_CHARACTER_SET_SERVER: utf8mb4
+      MARIADB_COLLATION_SERVER: utf8mb4_unicode_ci
     volumes:
       - mariadb_data:/var/lib/mysql
       # Run your schema once on first boot:
       - ./server/db_init.sql:/docker-entrypoint-initdb.d/20-schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -P 3307 -u root -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      # Use mariadb-admin; DB listens on 3306 inside the container
+      test: ["CMD-SHELL", "mariadb-admin ping -uroot -p$${MARIADB_ROOT_PASSWORD} --silent"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
+      start_period: 10s
 
   app:
     build: .
     container_name: varcac-app
-    # Provide your DB secrets at runtime (don’t bake .env into the image)
+    restart: unless-stopped
     env_file:
       - ./server/.env
     environment:
-      # Ensure host/port point at the db service:
       DB_HOST: db
       DB_PORT: "3306"
       NODE_ENV: production
-      PORT: 3001
+      PORT: "3001"
+      # If your server code supports BIND_ADDR, uncomment to ensure 0.0.0.0 in-container:
+      # BIND_ADDR: 0.0.0.0
     depends_on:
       db:
         condition: service_healthy
     ports:
+      # Expose app only on host loopback → NOT reachable from LAN
       - "127.0.0.1:3001:3001"
-    # If your server/index.js loads .env via dotenv, this still works:
-    # env_file injects those variables as process.env values
 
 volumes:
   mariadb_data:
