@@ -2720,3 +2720,94 @@ app.put('/api/settings/:name', async (req, res) => {
     return res.status(500).json({ error: 'Failed to save setting', detail: e.message })
   }
 })
+
+//CSV Exporter
+// GET /api/payout-history?participantIds=1,2&planIds=10,12
+app.get('/api/payout-history', async (req, res) => {
+  try {
+    // Parse filters
+    const pids = String(req.query.participantIds || '')
+      .split(',')
+      .map((s) => Number(s))
+      .filter(Number.isFinite)
+
+    const plids = String(req.query.planIds || '')
+      .split(',')
+      .map((s) => Number(s))
+      .filter(Number.isFinite)
+
+    const where = []
+    const args = []
+    if (pids.length) {
+      where.push(`pph.participant_id IN (${pids.map(() => '?').join(',')})`)
+      args.push(...pids)
+    }
+    if (plids.length) {
+      where.push(`pph.plan_id IN (${plids.map(() => '?').join(',')})`)
+      args.push(...plids)
+    }
+
+    // 1) Fetch history rows (use correct period column names)
+    const sqlHistory = `
+      SELECT pph.*
+      FROM participant_payout_history pph
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY pph.period_start, pph.period_end, pph.id
+    `
+    const [rows] = await pool.execute(sqlHistory, args)
+    if (!rows.length) return res.json([])
+
+    // 2) Resolve names for the IDs present in those rows
+    const pidSet = new Set(rows.map(r => r.participant_id).filter(v => v != null))
+    const plidSet = new Set(rows.map(r => r.plan_id).filter(v => v != null))
+
+    // plan_participant → "First Last"
+    let pMap = new Map()
+    if (pidSet.size) {
+      const pidList = Array.from(pidSet)
+      const [pNameRows] = await pool.execute(
+        `
+        SELECT
+          pp.id,
+          TRIM(CONCAT_WS(' ', pp.first_name, pp.last_name)) AS full_name
+        FROM plan_participant pp
+        WHERE pp.id IN (${pidList.map(() => '?').join(',')})
+        `,
+        pidList
+      )
+      pMap = new Map(pNameRows.map(r => [r.id, r.full_name || `Participant ${r.id}`]))
+    }
+
+    // comp_plan → name
+    let planMap = new Map()
+    if (plidSet.size) {
+      const plidList = Array.from(plidSet)
+      const [planNameRows] = await pool.execute(
+        `
+        SELECT cp.id, cp.name
+        FROM comp_plan cp
+        WHERE cp.id IN (${plidList.map(() => '?').join(',')})
+        `,
+        plidList
+      )
+      planMap = new Map(planNameRows.map(r => [r.id, r.name || `Plan ${r.id}`]))
+    }
+
+    // 3) Replace IDs with names (as requested)
+    const out = rows.map(r => {
+      const participantName = pMap.get(r.participant_id) || String(r.participant_id ?? '')
+      const planName        = planMap.get(r.plan_id)      || String(r.plan_id ?? '')
+      const { participant_id, plan_id, ...rest } = r
+      return {
+        ...rest,
+        participant_id: participantName, // now a human name
+        plan_id: planName,               // now a plan name
+      }
+    })
+
+    res.json(out)
+  } catch (e) {
+    console.error('GET /api/payout-history failed:', e)
+    res.status(500).json({ error: 'Failed to fetch payout history', detail: e.message })
+  }
+})
