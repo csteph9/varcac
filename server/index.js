@@ -68,7 +68,7 @@ app.use((req, _res, next) => {
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname  = path.dirname(__filename)
-const publicDir  = path.join(__dirname, 'dist')
+const publicDir  = path.join(__dirname, 'public')
 app.use(express.static(publicDir))
 app.get(/^\/(?!api).*/, (_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'))
