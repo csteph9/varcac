@@ -418,7 +418,7 @@ app.get('/api/participants/:id', async (req, res) => {
               pp.created_at      AS attachedAt
        FROM participant_plan pp
        JOIN comp_plan cp ON cp.id = pp.plan_id
-       WHERE pp.participant_id = :id
+       WHERE pp.participant_id = :id 
        ORDER BY pp.created_at DESC`, { id }
     )
 
@@ -452,18 +452,37 @@ app.post('/api/participants/:id/plans', async (req, res) => {
 
 // DETACH plan from participant
 app.delete('/api/participants/:participantId/plans/:participantPlanId', async (req, res) => {
+  const participantId = Number(req.params.participantId)
+  const participantPlanId = Number(req.params.participantPlanId)
+  
   try {
-    const participantId = Number(req.params.participantId)
-    const participantPlanId = Number(req.params.participantPlanId)
     await pool.execute(
-      `DELETE FROM participant_plan WHERE id = :participantPlanId AND participant_id = :participantId`,
+      `DELETE FROM participant_plan WHERE plan_id = :participantPlanId AND participant_id = :participantId`,
       { participantId, participantPlanId }
+    )
+
+    await pool.execute(
+      `DELETE FROM participant_payout_history WHERE plan_id = :participantPlanId AND participant_id = :participantId`,
+      { participantPlanId, participantId }
+    )
+    
+    res.status(204).end()
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Failed to detach plan', detail: e.message })
+  }
+  /*
+  try {
+    await pool.execute(
+      `DELETE FROM participant_payout_history WHERE plan_id = :participantPlanId AND participant_id = :participantId`,
+      { participantPlanId, participantId }
     )
     res.status(204).end()
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: 'Failed to detach plan', detail: e.message })
   }
+  */
 })
 
 
@@ -2020,7 +2039,6 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
 
 
 // Payout history for a participant, grouped by plan & period
-// GET /api/participants/:id/payout-history?planId=&from=&to=
 app.get('/api/participants/:id/payout-history', async (req, res) => {
   const participantId = Number(req.params.id)
   if (!Number.isFinite(participantId)) return res.status(400).json({ error: 'Invalid participant id' })
