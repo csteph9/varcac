@@ -348,27 +348,9 @@ app.delete('/api/plans/:id', async (req, res) => {
 })
 
 
-const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import)\b/
+const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import|Buffer|setImmediate|setInterval|setTimeout|clearImmediate|clearInterval|clearTimeout|console|Reflect|Proxy|with|GeneratorFunction|Object|Object\.assign|Object\.defineProperty|Object\.defineProperties|Object\.setPrototypeOf|Object\.getPrototypeOf|Object\.create|import\.meta|require\.resolve|Intl|Atomics|SharedArrayBuffer|Worker|MessageChannel|performance)\b/
 const nameRegex = /^[A-Za-z_][A-Za-z0-9_]*$/
 
-function validateFormulaSyntax(code) {
-  const src = String(code || '').trim()
-  if (!src) return
-  if (FORBIDDEN.test(src)) {
-    const err = new Error('Forbidden token in formula'); err.code = 'FORBIDDEN'; throw err
-  }
-  const hasReturn = /\breturn\b/.test(src)
-  // looks like statements? (const/let/var OR semicolon OR newline)
-  const looksMulti = /\b(?:const|let|var)\b/.test(src) || /;|\n/.test(src)
-  if (!hasReturn && looksMulti) {
-    const err = new Error('Multi-line formulas must include an explicit `return ...`')
-    err.code = 'NO_RETURN'
-    throw err
-  }
-  const body = hasReturn ? src : `return (${src});`
-  // eslint-disable-next-line no-new-func
-  new Function('sum','avg','min','max','count','clamp','period','participantId','planId', `"use strict"; ${body}`)
-}
 
 
 app.get('/api/participants', async (_req, res) => {
@@ -741,338 +723,6 @@ app.post('/api/plans', async (req, res) => {
     res.status(500).json({ error: 'Failed to create plan', detail: e.message });
   }
 });
-
-
-app.post('/api/plans/:id/calculate', async (req, res) => {
-  const planId = Number(req.params.id)
-  const triggeredBy = req.session?.user?.username || 'admin'
-  if (!Number.isFinite(planId)) return res.status(400).json({ error: 'Invalid plan id' })
-
-  // ---------- helpers ----------
-  const toDate = (s) => new Date(String(s).slice(0,10) + 'T00:00:00Z')
-  const ymd = (d) => {
-    const pad = (n)=>String(n).padStart(2,'0')
-    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())}`
-  }
-  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
-
-  // safe-ish formula guard (blocks obvious escapes; keep simple on purpose)
-  const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import)\b/
-  const makeFormulaFn = (code, argNames) => {
-    const src = String(code || '').trim()
-    if (!src) return null
-    if (FORBIDDEN.test(src)) throw new Error('Forbidden token in formula')
-    // Support expression or block-with-return
-    const body = /\breturn\b/.test(src) ? src : `return (${src});`
-    // eslint-disable-next-line no-new-func
-    return new Function(...argNames, `"use strict"; ${body}`)
-  }
-
-  // Aggregators exposed to formulas
-  const agg = {
-    sum: (arr) => (Array.isArray(arr) ? arr.reduce((a,b)=>a+num(b),0) : 0),
-    avg: (arr) => (Array.isArray(arr)&&arr.length ? arr.reduce((a,b)=>a+num(b),0)/arr.length : 0),
-    min: (arr) => (Array.isArray(arr)&&arr.length ? Math.min(...arr.map(num)) : 0),
-    max: (arr) => (Array.isArray(arr)&&arr.length ? Math.max(...arr.map(num)) : 0),
-    count: (arr)=> (Array.isArray(arr) ? arr.length : 0),
-    clamp: (x,lo,hi)=> Math.min(Math.max(num(x), num(lo)), num(hi)),
-  }
-
-  const conn = await pool.getConnection()
-  try {
-    await conn.beginTransaction()
-
-    // ---------- 0) plan + periods ----------
-    const [[plan]] = await conn.execute(
-      `SELECT id, payout_frequency AS payoutFrequency,
-              effective_start AS effectiveStart, effective_end AS effectiveEnd
-         FROM comp_plan WHERE id = :planId`,
-      { planId }
-    )
-    if (!plan) {
-      await conn.rollback(); conn.release()
-      return res.status(404).json({ error: 'Plan not found' })
-    }
-
-    const [periods] = await conn.execute(
-      `SELECT id, start_date AS start, end_date AS end, label
-         FROM plan_payout_period
-        WHERE plan_id = :planId
-        ORDER BY start_date ASC`,
-      { planId }
-    )
-    if (!periods.length) {
-      await conn.rollback(); conn.release()
-      return res.status(400).json({ error: 'No payout periods defined for this plan' })
-    }
-
-    // ---------- 1) reset run ----------
-    await conn.execute(`DELETE FROM plan_calculation_run WHERE plan_id = :planId`, { planId })
-    const [runIns] = await conn.execute(
-      `INSERT INTO plan_calculation_run (plan_id, triggered_by) VALUES (:planId, :triggeredBy)`,
-      { planId, triggeredBy }
-    )
-    const runId = runIns.insertId
-
-    // ---------- 2) participants assigned ----------
-    const [participants] = await conn.execute(
-      `SELECT DISTINCT participant_id AS participantId
-         FROM participant_plan
-        WHERE plan_id = :planId`,
-      { planId }
-    )
-    if (!participants.length) {
-      await conn.commit(); conn.release()
-      return res.json({ runId, rows: 0, totals: { participants: 0, elements: 0, periods: 0, totalComputed: 0 } })
-    }
-    const pIds = participants.map(x=>x.participantId)
-    const pParams = Object.fromEntries(pIds.map((v,i)=>[`p${i}`, v]))
-
-    // ---------- 3) plan elements + formulas ----------
-    const [elements] = await conn.execute(
-      `SELECT ed.id AS elementDefinitionId,
-              ed.name AS elementName,
-              ed.unit AS unit,
-              ed.rate AS rate,
-              ed.formula AS formulaJS,          -- use this column for JS
-              ed.formula_id AS formulaId,
-              ed.formula_params AS formulaParams
-         FROM plan_element pe
-         JOIN element_definition ed ON ed.id = pe.element_definition_id
-        WHERE pe.plan_id = :planId`,
-      { planId }
-    )
-    if (!elements.length) {
-      await conn.commit(); conn.release()
-      return res.json({ runId, rows: 0, totals: { participants: participants.length, elements: 0, periods: periods.length, totalComputed: 0 } })
-    }
-
-    // Ensure element variable names are valid JS identifiers
-    const validIdent = /^[A-Za-z_][A-Za-z0-9_]*$/
-    for (const e of elements) {
-      if (!validIdent.test(e.elementName)) {
-        await conn.rollback(); conn.release()
-        return res.status(400).json({ error: `Invalid element name for JS context: ${e.elementName}` })
-      }
-    }
-
-    // ---------- 4) pull all actuals within assignment ∩ plan periods ----------
-    const minStart = periods[0].start
-    const maxEnd   = periods[periods.length - 1].end
-
-    const eIds = elements.map(e=>e.elementDefinitionId)
-    const eParams = Object.fromEntries(eIds.map((v,i)=>[`e${i}`, v]))
-
-    const [actuals] = await conn.execute(
-      `SELECT pev.participant_id AS participantId,
-              pev.element_definition_id AS elementDefinitionId,
-              pev.metric_date AS metricDate,
-              pev.value AS value
-         FROM participant_element_value pev
-         JOIN participant_plan pp
-           ON pp.participant_id = pev.participant_id
-          AND pp.plan_id = :planId
-        WHERE pev.participant_id IN (${pIds.map((_,i)=>`:p${i}`).join(',')})
-          AND pev.element_definition_id IN (${eIds.map((_,i)=>`:e${i}`).join(',')})
-          AND pev.metric_date >= COALESCE(pp.effective_start, :minStart, '0001-01-01')
-          AND pev.metric_date <= COALESCE(pp.effective_end,   :maxEnd,   '9999-12-31')
-          AND pev.metric_date BETWEEN :minStart AND :maxEnd
-        ORDER BY pev.metric_date ASC`,
-      { ...pParams, ...eParams, planId, minStart, maxEnd }
-    )
-
-    // Index actuals by participant + element (sorted by date already)
-    const byPE = new Map() // key `${p}:${e}` -> [{metricDate, value}]
-    for (const r of actuals) {
-      const key = `${r.participantId}:${r.elementDefinitionId}`
-      if (!byPE.has(key)) byPE.set(key, [])
-      byPE.get(key).push({ metricDate: r.metricDate, value: num(r.value) })
-    }
-
-    // Build a name -> elementDefinitionId map for fast lookups
-    const idByName = Object.fromEntries(elements.map(e => [e.elementName, e.elementDefinitionId]))
-    const elemsById = Object.fromEntries(elements.map(e => [e.elementDefinitionId, e]))
-
-    // ---------- 5) evaluate per participant × period × element ----------
-    const rowsOut = []
-    let totalComputed = 0
-    let evaluatedElements = 0
-
-    // Prepare formula compilers per element (only once)
-    const elementArgNames = [
-      'sum','avg','min','max','count','clamp',   // helpers
-      'period','participantId','planId',         // metadata
-      // then each element variable by name (NEW_ARR, RETAIN_NR, ...)
-      ...elements.map(e => e.elementName)
-    ]
-    const compiled = new Map() // elementId -> compiled function or null
-
-    for (const e of elements) {
-      let fn = null
-      if (e.formulaJS && String(e.formulaJS).trim()) {
-        try {
-          fn = makeFormulaFn(e.formulaJS, elementArgNames)
-          console.log(fn);
-        } catch (err) {
-          // If compilation fails, treat as no-op (0) but keep going
-          fn = null
-        }
-      }
-      compiled.set(e.elementDefinitionId, fn)
-    }
-
-    // Helper: build the JS argument list for one participant+period
-    const buildArgsFor = (participantId, period) => {
-      // Each element becomes an object with { value: number[], rows: [{date,value}] } scoped to this period
-      const elementVars = elements.map(e => {
-        const series = byPE.get(`${participantId}:${e.elementDefinitionId}`) || []
-        const start = toDate(period.start), end = toDate(period.end)
-        const scoped = series.filter(r => r.metricDate >= period.start && r.metricDate <= period.end)
-        return {
-          value: scoped.map(r => r.value),
-          rows: scoped.map(r => ({ date: r.metricDate, value: r.value })),
-        }
-      })
-      return [
-        agg.sum, agg.avg, agg.min, agg.max, agg.count, agg.clamp,
-        { start: period.start, end: period.end, label: period.label ?? null },
-        participantId, planId,
-        ...elementVars
-      ]
-    }
-
-    for (const p of participants) {
-      const participantId = p.participantId
-      for (const period of periods) {
-        // Build context args once per participant×period
-        const args = buildArgsFor(participantId, period)
-
-        for (const e of elements) {
-          const fn = compiled.get(e.elementDefinitionId)
-          let computed = 0
-          if (fn) {
-            try {
-              const out = fn(...args)
-              computed = num(out)
-            } catch {
-              computed = 0
-            }
-          } else {
-            // default: sum of own values this period (if no formula provided)
-            const idx = elementArgNames.indexOf(e.elementName)
-            const varObj = args[idx] // position matches argNames
-            computed = agg.sum(varObj?.value || [])
-          }
-
-          // Only record if there is any activity (or always? choose to record all)
-          // Here: record all elements for all periods so totals align
-          rowsOut.push({
-            runId,
-            planId,
-            participantId,
-            elementDefinitionId: e.elementDefinitionId,
-            metricDate: period.end,        // use period end as the "date" of the computed row
-            inputValue: null,              // not meaningful in this model
-            rate: e.rate != null ? Number(e.rate) : null,
-            formula: e.formulaJS || null,
-            computedValue: computed
-          })
-          totalComputed += computed
-        }
-      }
-    }
-
-    evaluatedElements = elements.length
-
-    // ---------- 6) insert results ----------
-    if (rowsOut.length) {
-      const CHUNK = 500
-      for (let i = 0; i < rowsOut.length; i += CHUNK) {
-        const slice = rowsOut.slice(i, i + CHUNK)
-        const valuesSql = slice.map((_, j) =>
-          `(:run${i+j}, :plan${i+j}, :prt${i+j}, :elem${i+j}, :date${i+j}, :in${i+j}, :rate${i+j}, :fml${i+j}, :cmp${i+j})`
-        ).join(',')
-        const params = {}
-        slice.forEach((rr, k) => {
-          const n = i + k
-          params[`run${n}`]=rr.runId
-          params[`plan${n}`]=rr.planId
-          params[`prt${n}`]=rr.participantId
-          params[`elem${n}`]=rr.elementDefinitionId
-          params[`date${n}`]=rr.metricDate
-          params[`in${n}`]=rr.inputValue
-          params[`rate${n}`]=rr.rate
-          params[`fml${n}`]=rr.formula
-          params[`cmp${n}`]=rr.computedValue
-        })
-        await conn.execute(
-          `INSERT INTO plan_calculation_result
-             (run_id, plan_id, participant_id, element_definition_id, metric_date,
-              input_value, rate, formula, computed_value)
-           VALUES ${valuesSql}`,
-          params
-        )
-      }
-    }
-
-    // ---------- 7) update run totals ----------
-    await conn.execute(
-      `UPDATE plan_calculation_run SET totals_json = :tj WHERE id = :runId`,
-      {
-        runId,
-        tj: JSON.stringify({
-          participants: participants.length,
-          elements: evaluatedElements,
-          periods: periods.length,
-          rows: rowsOut.length,
-          totalComputed
-        })
-      }
-    )
-
-    await conn.commit(); conn.release()
-    res.json({ runId, rows: rowsOut.length, totals: { participants: participants.length, elements: evaluatedElements, periods: periods.length, totalComputed } })
-  } catch (e) {
-    try { await conn.rollback() } catch {}
-    conn.release()
-    console.error(e)
-    res.status(500).json({ error: 'Calculation failed', detail: e.message })
-  }
-})
-
-
-// Fetch latest calc results for a plan (flattened)
-app.get('/api/plans/:id/calculations', async (req, res) => {
-  try {
-    const planId = Number(req.params.id)
-    // latest run id
-    const [[run]] = await pool.execute(
-      `SELECT id, run_at AS runAt, totals_json AS totals
-       FROM plan_calculation_run
-       WHERE plan_id = :planId
-       ORDER BY run_at DESC
-       LIMIT 1`,
-      { planId }
-    )
-    if (!run) return res.json({ run: null, results: [] })
-
-    const [rows] = await pool.execute(
-      `SELECT r.id, r.participant_id AS participantId, p.first_name AS firstName, p.last_name AS lastName,
-              r.element_definition_id AS elementDefinitionId, ed.name AS elementName, ed.element_type AS elementType, ed.unit,
-              r.metric_date AS metricDate, r.input_value AS inputValue, r.rate, r.formula, r.computed_value AS computedValue
-       FROM plan_calculation_result r
-       JOIN plan_participant p ON p.id = r.participant_id
-       JOIN element_definition ed ON ed.id = r.element_definition_id
-       WHERE r.run_id = :runId
-       ORDER BY p.last_name, p.first_name, r.metric_date, ed.name`,
-      { runId: run.id }
-    )
-    res.json({ run, results: rows })
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Failed to load calculations' })
-  }
-})
 
 // --- API: Participant payout summary (by plan, by period) ---
 app.get('/api/participants/:id/payout-summary', async (req, res) => {
@@ -1754,6 +1404,9 @@ async function getLodashTemplate() {
   return null
 }
 
+// Put this near the top of your server file:
+//const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import)\b/
+
 app.post('/api/plans/:id/run-computations', async (req, res) => {
   const planId = Number(req.params.id)
   if (!Number.isFinite(planId)) return res.status(400).json({ error: 'Invalid plan id' })
@@ -1863,16 +1516,38 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
       return res.json({ planId, participants: participants.length, computations: 0, periods: 0, inserted: 0, note: 'No computations attached to plan.' })
     }
 
+    // ---- SECURITY: scan for forbidden keywords before compiling
+    const blocked = []
+    const safeComps = []
+    for (const c of comps) {
+      const t = String(c.template || '')
+      const m = t.match(FORBIDDEN)
+      if (m) {
+        blocked.push({ computationId: c.id, name: c.name, keyword: m[0] })
+      } else {
+        safeComps.push(c)
+      }
+    }
+
+    // If everything is unsafe, fail fast. Otherwise continue with safe ones and report.
+    if (!safeComps.length) {
+      await conn.rollback(); conn.release()
+      return res.status(400).json({
+        error: 'All computation templates blocked by security policy',
+        blocked
+      })
+    }
+
     // idempotent clear for this plan
     await conn.execute(`DELETE FROM participant_payout_history WHERE plan_id = ?`, [planId])
 
-    // precompile templates
+    // precompile templates (safe only)
     const compiled = new Map()
-    for (const c of comps) compiled.set(c.id, lodashTemplate(c.template || ''))
+    for (const c of safeComps) {
+      compiled.set(c.id, lodashTemplate(String(c.template || '')))
+    }
 
     // ---- helpers
-
-    // Get all descendant ids (direct + indirect), excluding the root id
     function getDescendants(rootId) {
       const out = new Set()
       const q = [...(reportsByManager.get(rootId) || [])]
@@ -1886,7 +1561,6 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
       return [...out]
     }
 
-    // Sum source_data for a set of targetIds within [start,end]
     async function fetchTotalsForTargets(targetIds, startDate, endDate) {
       if (!targetIds?.length) return {}
       const ph = targetIds.map(()=>'?').join(',')
@@ -1926,10 +1600,9 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
     // ---- main loop
     for (const p of participants) {
       const participantId = p.participantId
-      const descendantIds = getDescendants(participantId)          // all levels
-      const directIds = reportsByManager.get(participantId) || []  // immediate
+      const descendantIds = getDescendants(participantId)
+      const directIds = reportsByManager.get(participantId) || []
 
-      // rollup meta for payload
       const rollupMeta = {
         scope: descendantIds.length ? 'manager' : 'individual',
         managerId: participantId,
@@ -1940,6 +1613,18 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
       }
 
       for (const comp of comps) {
+        // Skip & record blocked computations
+        if (!compiled.has(comp.id)) {
+          const t = String(comp.template || '')
+          const m = t.match(FORBIDDEN)
+          errors.push({
+            participantId,
+            computationId: comp.id,
+            error: `Template blocked by security policy${m ? ` (keyword: ${m[0]})` : ''}`
+          })
+          continue
+        }
+
         const tpl = compiled.get(comp.id)
         const scope = comp.scope === 'plan' ? 'plan' : 'payout'
         const periods = scope === 'plan'
@@ -1961,7 +1646,6 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
 
             // lodash context
             const context = {
-              // legacy compatibility: totals = self totals
               totals: selfTotals,
               totals_dr: drTotals,
 
@@ -1980,16 +1664,25 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
               participantId,
               planId,
 
-              // org helpers available to templates
               directReports: rollupMeta.directReports,
               descendants:   rollupMeta.descendants,
               rollupInfo: () => rollupMeta,
 
-              // emit function (returns JSON string)
               emit_commission: JSON.stringify,
             }
 
-            const rendered = tpl(context)           // must use <%= emit_commission(...) %> in template
+            // Final belt-and-suspenders check right before render (handles any mutated/loaded strings)
+            const maybeUnsafe = String(comp.template || '').match(FORBIDDEN)
+            if (maybeUnsafe) {
+              errors.push({
+                participantId,
+                computationId: comp.id,
+                error: `Template blocked by security policy at render time (keyword: ${maybeUnsafe[0]})`
+              })
+              continue
+            }
+
+            const rendered = tpl(context) // must use <%= emit_commission(...) %> in template
             const items = normalizeTemplateOutput(comp, rendered)
             if (!items.length) continue
 
@@ -2028,7 +1721,15 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
     }
 
     await conn.commit(); conn.release()
-    res.json({ planId, participants: participants.length, computations: comps.length, periods: periodRows.length || 1, inserted, errors })
+    res.json({
+      planId,
+      participants: participants.length,
+      computations: comps.length,
+      periods: periodRows.length || 1,
+      inserted,
+      blocked, // report what we skipped
+      errors
+    })
   } catch (e) {
     try { await conn.rollback() } catch {}
     conn.release()
@@ -2036,6 +1737,7 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
     res.status(500).json({ error: 'Run computations failed', detail: e.message })
   }
 })
+
 
 
 // Payout history for a participant, grouped by plan & period
@@ -2175,6 +1877,8 @@ function prettyTemplate(src = '') {
   }
   return lines.join('\n').trim()
 }
+
+
 app.post('/api/participants/:id/comp-statement', async (req, res) => {
 
   const participantId = Number(req.params.id)
@@ -2263,7 +1967,6 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
       g.total += Number(row.amount || 0)
       g.items.push({ outputLabel: row.outputLabel, amount: Number(row.amount || 0), createdAt: row.createdAt })
     }
-    // simple object form for EJS
     const groupsByPlanId = Object.fromEntries(
       [...groupsByPlanMap.entries()].map(([planId, mp]) => [planId, [...mp.values()]])
     )
@@ -2343,7 +2046,7 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
     } else {
       const [tplRows] = await conn.execute(
         `SELECT setting_value
-          FROM settings
+           FROM settings
           WHERE setting_name = ?
           ORDER BY id DESC
           LIMIT 1`,
@@ -2352,26 +2055,33 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
       templateString = (tplRows?.[0]?.setting_value || '').toString()
     }
 
-    // If there’s still no template, either error out or fall back to a tiny placeholder:
+    // Require a template
     if (!templateString.trim()) {
-      // Option A: hard error (recommended so you notice misconfig)
       return res.status(500).json({
         error: "Comp plan template not configured",
         detail: "Add a row in settings with setting_name='comp_plan_template_ejs'."
       })
+    }
 
-      // Option B: fallback HTML (uncomment to use)
-      // templateString = `<!DOCTYPE html><html><body><p>Template not found. Please load from DB.</p></body></html>`
+    // 🔒 SECURITY: Validate template at render time (DB-loaded or inline override)
+    {
+      const m = String(templateString).match(FORBIDDEN)
+      if (m) {
+        return res.status(400).json({
+          error: 'Template blocked by security policy',
+          detail: `Forbidden keyword detected: ${m[0]}`
+        })
+      }
     }
     // -----------------------------------------------------------------------
 
+    // Render AFTER the safety check
     const html = await ejs.render(templateString, {
-      // data payload
       generatedAt: new Date().toLocaleString(),
       participant: pt || { id: participantId },
       plans,
-      groupsByPlanId,      // { [planId]: [{ key,label,start,end,due,total,items[] }, ...] }
-      sourceDataByWindow,  // { [groupKey]: [ {date,label,value,origin,description}, ... ] }
+      groupsByPlanId,
+      sourceDataByWindow,
       appendix,
 
       // helpers available in EJS
@@ -2389,6 +2099,7 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
     try { conn.release() } catch {}
   }
 })
+
 
 
 app.get('/api/plans/:id/payout-run-summary', async (req, res) => {
@@ -2705,6 +2416,14 @@ app.put('/api/settings/:name', async (req, res) => {
   // Accept strings only; coerce others (null/undefined become empty string)
   const raw = req.body?.setting_value
   const value = typeof raw === 'string' ? raw : String(raw ?? '')
+
+  // 🔒 Reject unsafe EJS templates
+  if (FORBIDDEN.test(value)) {
+    return res.status(400).json({
+      error: 'Invalid template: forbidden keyword detected'
+    })
+  }
+
 
   try {
     // Does a row already exist? (no unique index, so grab the most recent)
