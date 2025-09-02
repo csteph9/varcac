@@ -998,13 +998,20 @@ try {
 function validateLodashTemplateMaybe(tpl) {
   const src = (tpl ?? '').toString()
   if (!src.trim()) return
+
+  // 🔒 Security check BEFORE compile
+  const m = FORBIDDEN.exec(src)
+  if (m) {
+    const err = new Error(`Template blocked by security policy (keyword: ${m[0]})`)
+    err.code = 'E_TEMPLATE_FORBIDDEN'
+    throw err
+  }
+
   if (lodashTemplate) {
     // Minimal settings; lodash has sensible defaults, this is just to be explicit
     lodashTemplate(src) // throws on syntax error
   } else {
-    // No lodash available: do a super-lightweight sanity check (never throws on plain text)
-    // Accept if it has tags like <% ... %> or is plain text
-    // If you want stricter validation, install lodash(-es) on the server.
+    // No lodash available: keep permissive behavior (plain text is fine)
     return
   }
 }
