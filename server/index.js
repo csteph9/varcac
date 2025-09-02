@@ -19,12 +19,17 @@ import os from 'os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ejs from 'ejs'
+import { rateLimit, ipKeyGenerator } from 'express-rate-limit'
+
+const baseKey = (req) => (req.user?.id ? `u:${req.user.id}` : ipKeyGenerator(req))
+
 const upload = multer({ dest: os.tmpdir() })
 
 const lodashTemplate = _.template
 
 
 const app = express();
+app.set('trust proxy', true) // if behind a proxy/load balancer
 const PORT = process.env.PORT || 3001;
 
 const parser = new Parser({ operators: { logical: true, comparison: true, ternary: true } })
@@ -34,6 +39,16 @@ parser.functions.max = Math.max
 parser.functions.round = (x, d=0) => {
   const p = Math.pow(10, d|0); return Math.round(Number(x)*p)/p
 }
+
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 600,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  keyGenerator: baseKey,   // ✅ IPv6-safe
+  message: { error: 'Too many requests, please try again later.' },
+})
+
 
 app.use(morgan('dev'));
 app.use(express.json());
@@ -75,7 +90,7 @@ app.get(/^\/(?!api).*/, (_req, res) => {
 })
 
 
-app.get('/api/me', (req, res) => {
+app.get('/api/me', apiLimiter, (req, res) => {
   res.json({ user: req.session.user });
 });
 
@@ -2240,7 +2255,6 @@ app.get('/api/dashboard', async (req, res) => {
 
 // ---------- Admin: Backup ----------
 app.get('/api/admin/backup', async (req, res) => {
-
   const DB_HOST = process.env.DB_HOST
   const DB_PORT = Number(process.env.DB_PORT)
   const DB_USER = process.env.DB_USER
@@ -2259,7 +2273,7 @@ app.get('/api/admin/backup', async (req, res) => {
         database: DB_NAME,
       },
       dump: {
-        schema:  { table: { dropIfExist: true } },
+        schema:  { table: { dropIfExist: true } }, // keep your DROP TABLE IF EXISTS
         data:    { format: true },
         trigger: true,
         routine: true,
@@ -2267,13 +2281,31 @@ app.get('/api/admin/backup', async (req, res) => {
       },
     })
 
+    // --- rewrite only the settings table inserts to REPLACE ---
+    const dataRaw = dump.dump?.data || ''
+    // robust to case/whitespace/backticks and optional IGNORE
+    const dataFixed = dataRaw.replace(
+      /INSERT\s+(?:IGNORE\s+)?INTO\s+`?settings`?\s/gi,
+      'REPLACE INTO `settings` '
+    )
+
+    // Optional: small pre/post that are safe in a standalone dump file
+    const preamble = [
+      `-- Dump of database ${DB_NAME} on ${new Date().toISOString()}`,
+      'SET FOREIGN_KEY_CHECKS=0;',
+    ].join('\n')
+
+    const postamble = 'SET FOREIGN_KEY_CHECKS=1;'
+
     const sql = [
-      `-- Dump of database ${DB_NAME} on ${new Date().toISOString()}\n`,
+      preamble,
       dump.dump?.schema  || '',
       dump.dump?.trigger || '',
       dump.dump?.routine || '',
       dump.dump?.view    || '',
-      dump.dump?.data    || '',
+      dataFixed,               // << use the fixed data section
+      postamble,
+      '', // trailing newline
     ].join('\n')
 
     const dateStr = new Date().toISOString().slice(0,10) // YYYY-MM-DD
@@ -2281,7 +2313,7 @@ app.get('/api/admin/backup', async (req, res) => {
 
     res.setHeader('Content-Type', 'application/sql; charset=utf-8')
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`)
-    res.status(200).end(sql, 'utf8') // send directly, no temp file
+    res.status(200).end(sql, 'utf8')
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: 'Backup failed', detail: e.message })
@@ -2289,7 +2321,67 @@ app.get('/api/admin/backup', async (req, res) => {
 })
 
 
+
 // ---------- Admin: Restore ----------
+// ---- helper: boundary-safe streaming replacer --------------------------------
+import { Transform } from 'node:stream'
+import { StringDecoder } from 'node:string_decoder'
+import { pipeline as pipe } from 'node:stream/promises'
+import fsp from 'node:fs/promises'
+
+async function ensureUniqueIndexOnSettings(pool) {
+  const [rows] = await pool.execute('SHOW INDEX FROM `settings`')
+  const byName = new Map()
+  for (const r of rows) {
+    const name = r.Key_name
+    const nonUnique = Number(r.Non_unique)
+    const seq = Number(r.Seq_in_index)
+    const col = r.Column_name
+    if (!byName.has(name)) byName.set(name, { nonUnique, cols: [] })
+    byName.get(name).cols[seq - 1] = col
+  }
+  // Unique exactly on (setting_name) already exists?
+  for (const { nonUnique, cols } of byName.values()) {
+    if (nonUnique === 0 && cols.length === 1 && cols[0] === 'setting_name') return
+  }
+  // Create only if missing (name might differ in dump)
+  try {
+    await pool.execute('ALTER TABLE `settings` ADD UNIQUE KEY `uq_settings_setting_name` (`setting_name`)')
+  } catch (e) {
+    // If name is taken but the constraint doesn't exist under this name,
+    // fall back to a fresh unique index name.
+    if (String(e?.message || '').match(/Duplicate key name/i)) {
+      await pool.execute('CREATE UNIQUE INDEX `uq_settings_setting_name_auto` ON `settings` (`setting_name`)')
+    } else {
+      throw e
+    }
+  }
+}
+
+function createInsertToReplaceSettingsStream() {
+  const decoder = new StringDecoder('utf8')
+  let buf = ''
+  const re = /insert\s+(?:ignore\s+)?into\s+`?settings`?\s/gi
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      buf += decoder.write(chunk)
+      const lines = buf.split('\n')
+      buf = lines.pop() || ''
+      for (let line of lines) {
+        line = line.replace(re, (m) => m.replace(/insert\s+(?:ignore\s+)?into/i, 'REPLACE INTO'))
+        this.push(line + '\n')
+      }
+      cb()
+    },
+    flush(cb) {
+      this.push(buf.replace(re, (m) => m.replace(/insert\s+(?:ignore\s+)?into/i, 'REPLACE INTO')))
+      cb()
+    },
+  })
+}
+
+// Uses your Multer middleware: upload.single('dump')
+// Assumes app, pool, upload are defined earlier
 app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
   const confirm = req.body?.confirm
   if (confirm !== 'ERASE') return res.status(400).json({ error: 'Confirmation required: type ERASE' })
@@ -2304,55 +2396,69 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
   const dumpPath = req.file.path
 
   try {
-    const args = ['-h', DB_HOST, '-P', DB_PORT, '-u', DB_USER]
+    // A) Drop unique index so old dumps don’t abort
+    try {
+      await pool.execute('ALTER TABLE `settings` DROP INDEX `uq_settings_setting_name`')
+    } catch (e) {
+      const msg = String(e?.message || e)
+      if (!/drop .*uq_settings_setting_name|does.*exist/i.test(msg)) throw e
+    }
+
+    // B) Run mysql and stream the dump safely
+    const args = ['-h', DB_HOST, '-P', String(DB_PORT), '-u', DB_USER]
     if (DB_PASSWORD) args.push(`-p${DB_PASSWORD}`)
+    args.push('--force') // pragmatic: continue past non-fatal errors
     args.push(DB_NAME)
 
-    await new Promise((resolve, reject) => {
-      const mysql = spawn('mysql', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const mysql = spawn('mysql', args, { stdio: ['pipe', 'pipe', 'pipe'] })
 
-      let stderr = ''
-      mysql.stderr.on('data', (d) => { stderr += d.toString() })
+    let stderr = ''
+    mysql.stderr.on('data', (d) => { stderr += d.toString() })
 
-      // 1) disable checks
-      mysql.stdin.write([
-        'SET FOREIGN_KEY_CHECKS=0;',
-        'SET UNIQUE_CHECKS=0;',
-        'SET SQL_NOTES=0;',
-        '\n'
-      ].join('\n'))
+    // Avoid process crash if child closes stdin early
+    mysql.stdin.on('error', (err) => {
+      if (err?.code !== 'EPIPE') {
+        console.warn('mysql.stdin error:', err?.message || err)
+      }
+    })
 
-      // 2) stream file
-      const rs = fs.createReadStream(dumpPath)
-      rs.pipe(mysql.stdin, { end: false })
-      rs.on('error', (e) => reject(e))
-      rs.on('end', () => {
-        // 3) re-enable checks and end stdin
-        mysql.stdin.write([
-          '\n',
-          'SET SQL_NOTES=1;',
-          'SET UNIQUE_CHECKS=1;',
-          'SET FOREIGN_KEY_CHECKS=1;',
-          '\n'
-        ].join('\n'))
-        mysql.stdin.end()
-      })
+    const rs = fs.createReadStream(dumpPath)
+    const replacer = createInsertToReplaceSettingsStream()
 
+    // Pipe with backpressure + error propagation
+    let pipeErr = null
+    const pipePromise = pipe(rs, replacer, mysql.stdin).catch((err) => {
+      // EPIPE just means child closed; let close handler decide outcome
+      if (!(err && err.code === 'EPIPE')) pipeErr = err
+    })
+
+    const closePromise = new Promise((resolve, reject) => {
       mysql.on('close', (code) => {
-        if (code === 0) resolve()
-        else reject(new Error(stderr || `mysql exited with ${code}`))
+        if (pipeErr) return reject(pipeErr)
+        if (code === 0) return resolve()
+        return reject(new Error(stderr || `mysql exited with ${code}`))
       })
     })
 
-    // ---- NEW: record the restore in settings ----
+    await Promise.all([pipePromise, closePromise])
+
+    // C) De-dupe and re-add unique index
+    await pool.execute(`
+      DELETE s1
+      FROM settings s1
+      JOIN settings s2
+        ON s1.setting_name = s2.setting_name
+       AND s1.id < s2.id
+    `)
+    await ensureUniqueIndexOnSettings(pool)
+
+    // D) Record the restore
     try {
-      // use the original uploaded file name, not Multer's temp filename
       const fileName = (() => {
         const orig = req.file?.originalname
         if (typeof orig === 'string' && orig.trim()) return path.basename(orig)
         return path.basename(dumpPath)
       })()
-
       const now = new Date()
       const pad = n => String(n).padStart(2, '0')
       const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
@@ -2363,29 +2469,26 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
         ['current_restore']
       )
       if (rows.length) {
-        await pool.execute(
-          'UPDATE settings SET setting_value = ? WHERE id = ?',
-          [value, rows[0].id]
-        )
+        await pool.execute('UPDATE settings SET setting_value = ? WHERE id = ?', [value, rows[0].id])
       } else {
-        await pool.execute(
-          'INSERT INTO settings (setting_name, setting_value) VALUES (?, ?)',
-          ['current_restore', value]
-        )
+        await pool.execute('INSERT INTO settings (setting_name, setting_value) VALUES (?, ?)', ['current_restore', value])
       }
     } catch (e) {
       console.warn('Restore completed but failed to write current_restore setting:', e.message)
     }
-    // --------------------------------------------
+
+    // E) Cleanup AFTER streaming is done (prevents ENOENT races)
+    await fsp.rm(dumpPath, { force: true })
 
     res.json({ ok: true })
   } catch (e) {
     console.error(e)
+    // Best-effort cleanup if something failed before we opened the stream
+    try { await fsp.rm(dumpPath, { force: true }) } catch {}
     res.status(500).json({ error: 'Restore failed', detail: e.message })
-  } finally {
-    try { fs.unlinkSync(dumpPath) } catch {}
   }
 })
+
 
 
 // READ template by setting_name
