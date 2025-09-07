@@ -363,7 +363,7 @@ app.delete('/api/plans/:id', async (req, res) => {
 })
 
 
-const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import|Buffer|setImmediate|setInterval|setTimeout|clearImmediate|clearInterval|clearTimeout|console|Reflect|Proxy|with|GeneratorFunction|Object|Object\.assign|Object\.defineProperty|Object\.defineProperties|Object\.setPrototypeOf|Object\.getPrototypeOf|Object\.create|import\.meta|require\.resolve|Intl|Atomics|SharedArrayBuffer|Worker|MessageChannel|performance)\b/
+const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import|Buffer|setImmediate|setInterval|setTimeout|clearImmediate|clearInterval|clearTimeout|console|Reflect|Proxy|GeneratorFunction|Object|Object\.assign|Object\.defineProperty|Object\.defineProperties|Object\.setPrototypeOf|Object\.getPrototypeOf|Object\.create|import\.meta|require\.resolve|Intl|Atomics|SharedArrayBuffer|Worker|MessageChannel|performance)\b/
 const nameRegex = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 
@@ -1067,6 +1067,24 @@ app.get('/api/computations/:id', async (req, res) => {
   }
 })
 
+function extractSourceLabelsFromTemplate(tpl) {
+  const src = String(tpl ?? '')
+  // match:  sum('LABEL')  sum_dr("LABEL")  has('LABEL')  has_dr("LABEL")
+  // capture group 2 = the label (handles \" or \')
+  const re = /\b(?:sum|sum_dr|has|has_dr)\s*\(\s*(['"])((?:\\.|(?!\1).)*?)\1/g
+  const labels = new Set()
+  let m
+  while ((m = re.exec(src))) {
+    // Unescape any \" or \'
+    const label = m[2].replace(/\\(['"])/g, '$1').trim()
+    if (label) labels.add(label)
+  }
+  // Return a stable, human-friendly list
+  return [...labels].sort((a, b) => a.localeCompare(b)).join(', ')
+}
+
+
+
 // Create
 app.post('/api/computations', async (req, res) => {
   const { name, scope, template } = req.body || {}
@@ -1078,12 +1096,25 @@ app.post('/api/computations', async (req, res) => {
   catch (e) { return res.status(422).json({ error: 'Invalid lodash template', detail: e.message }) }
 
   try {
+    // ★ insert first (template may be null)
     const [ins] = await pool.execute(
       `INSERT INTO computation_definition (name, scope, template)
        VALUES (?, ?, ?)`,
       [name, scopeVal, template || null]
     )
-    res.status(201).json({ id: ins.insertId, name, scope: scopeVal })
+
+    // ★ compute inputs from the just-saved template (stringify guards null)
+    const inputsCSV = extractSourceLabelsFromTemplate(template)
+
+    // ★ persist the inputs list
+    await pool.execute(
+      `UPDATE computation_definition
+          SET source_data_inputs = ?
+        WHERE id = ?`,
+      [inputsCSV || null, ins.insertId]
+    )
+
+    res.status(201).json({ id: ins.insertId, name, scope: scopeVal, source_data_inputs: inputsCSV })
   } catch (e) {
     if (e?.errno === 1062) return res.status(409).json({ error: 'Computation name already exists' })
     res.status(500).json({ error: 'Failed to create computation', detail: e.message })
@@ -1109,17 +1140,39 @@ app.put('/api/computations/:id', async (req, res) => {
   if (name !== undefined)     { sets.push('name = ?');     params.push(name) }
   if (scope !== undefined)    { sets.push('scope = ?');    params.push(scope) }
   if (template !== undefined) { sets.push('template = ?'); params.push(template || null) }
-  if (!sets.length) return res.json({ ok: true, updated: 0 })
-  params.push(id)
+
+  // If nothing to update, we still refresh source_data_inputs from current template
+  const doNoOpUpdate = !sets.length
 
   try {
-    const [r] = await pool.execute(
+    if (!doNoOpUpdate) {
+      params.push(id)
+      await pool.execute(
+        `UPDATE computation_definition
+            SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?`,
+        params
+      )
+    }
+
+    // --- ★ Always recompute source_data_inputs (from new template if provided, else fetch)
+    let tplStr = template
+    if (tplStr === undefined) {
+      const [[row]] = await pool.execute(
+        `SELECT template FROM computation_definition WHERE id = ? LIMIT 1`,
+        [id]
+      )
+      tplStr = row?.template ?? ''
+    }
+    const inputsCSV = extractSourceLabelsFromTemplate(tplStr)
+    await pool.execute(
       `UPDATE computation_definition
-          SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP
+          SET source_data_inputs = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?`,
-      params
+      [inputsCSV || null, id]
     )
-    res.json({ ok: true, updated: r.affectedRows })
+
+    res.json({ ok: true, updated: doNoOpUpdate ? 0 : 1, source_data_inputs: inputsCSV })
   } catch (e) {
     if (e?.errno === 1062) return res.status(409).json({ error: 'Computation name already exists' })
     res.status(500).json({ error: 'Failed to update computation', detail: e.message })
@@ -2273,7 +2326,7 @@ app.get('/api/admin/backup', async (req, res) => {
         database: DB_NAME,
       },
       dump: {
-        schema:  { table: { dropIfExist: true } }, // keep your DROP TABLE IF EXISTS
+        schema:  { table: { dropIfExist: true } }, // keep DROP TABLE IF EXISTS
         data:    { format: true },
         trigger: true,
         routine: true,
@@ -2281,15 +2334,13 @@ app.get('/api/admin/backup', async (req, res) => {
       },
     })
 
-    // --- rewrite only the settings table inserts to REPLACE ---
+    // Rewrite only the `settings` table inserts to REPLACE (prevents 1062 on restore)
     const dataRaw = dump.dump?.data || ''
-    // robust to case/whitespace/backticks and optional IGNORE
     const dataFixed = dataRaw.replace(
       /INSERT\s+(?:IGNORE\s+)?INTO\s+`?settings`?\s/gi,
       'REPLACE INTO `settings` '
     )
 
-    // Optional: small pre/post that are safe in a standalone dump file
     const preamble = [
       `-- Dump of database ${DB_NAME} on ${new Date().toISOString()}`,
       'SET FOREIGN_KEY_CHECKS=0;',
@@ -2303,15 +2354,16 @@ app.get('/api/admin/backup', async (req, res) => {
       dump.dump?.trigger || '',
       dump.dump?.routine || '',
       dump.dump?.view    || '',
-      dataFixed,               // << use the fixed data section
+      dataFixed,
       postamble,
-      '', // trailing newline
+      '',
     ].join('\n')
 
+    // Backend owns the filename; use .varcac
     const dateStr = new Date().toISOString().slice(0,10) // YYYY-MM-DD
-    const fname = `varcac_db_backup-${dateStr}.sql`
+    const fname = `varcac_db_backup-${dateStr}.varcac`
 
-    res.setHeader('Content-Type', 'application/sql; charset=utf-8')
+    res.setHeader('Content-Type', 'application/octet-stream')
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`)
     res.status(200).end(sql, 'utf8')
   } catch (e) {
@@ -2319,6 +2371,7 @@ app.get('/api/admin/backup', async (req, res) => {
     res.status(500).json({ error: 'Backup failed', detail: e.message })
   }
 })
+
 
 
 
@@ -2656,5 +2709,101 @@ app.get('/api/payout-history', async (req, res) => {
   } catch (e) {
     console.error('GET /api/payout-history failed:', e)
     res.status(500).json({ error: 'Failed to fetch payout history', detail: e.message })
+  }
+})
+
+
+// GET /api/participants/:id/required-source-inputs
+// Returns: { participantId, allInputs: string[], plans: [{ planId, planName, planVersion, inputs: string[], computations: [{id,name,inputs:string[]}] }] }
+app.get('/api/participants/:id/required-source-inputs', async (req, res) => {
+  const participantId = Number(req.params.id)
+  if (!Number.isFinite(participantId)) {
+    return res.status(400).json({ error: 'Invalid participant id' })
+  }
+
+  const splitCSV = (csv) => {
+    if (!csv) return []
+    return String(csv)
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean)
+  }
+
+  try {
+    // 1) Plans attached to participant
+    const [ppRows] = await pool.execute(
+      `SELECT pp.plan_id AS planId
+         FROM participant_plan pp
+        WHERE pp.participant_id = ?`,
+      [participantId]
+    )
+    const planIds = ppRows.map(r => r.planId)
+    if (!planIds.length) {
+      return res.json({ participantId, allInputs: [], plans: [] })
+    }
+
+    // 2) For those plans, pull plan info + computations + inputs
+    const placeholders = planIds.map(() => '?').join(',')
+    const [rows] = await pool.execute(
+      `SELECT
+          p.id           AS planId,
+          p.name         AS planName,
+          p.version      AS planVersion,
+          c.id           AS computationId,
+          c.name         AS computationName,
+          c.source_data_inputs AS inputsCSV
+        FROM plan_computation pc
+        JOIN comp_plan p              ON p.id = pc.plan_id
+        JOIN computation_definition c ON c.id = pc.computation_id
+       WHERE pc.plan_id IN (${placeholders})
+       ORDER BY p.id ASC, c.name ASC`,
+      planIds
+    )
+
+    // 3) Build per-plan + overall sets (case-insensitive de-dupe, preserve label casing by uppercasing)
+    const plansMap = new Map()
+    const allSet = new Set()
+
+    for (const r of rows) {
+      if (!plansMap.has(r.planId)) {
+        plansMap.set(r.planId, {
+          planId: r.planId,
+          planName: r.planName,
+          planVersion: r.planVersion,
+          inputs: new Set(),
+          computations: []
+        })
+      }
+      const compInputs = splitCSV(r.inputsCSV).map(s => s.toUpperCase())
+      compInputs.forEach(x => allSet.add(x))
+
+      plansMap.get(r.planId).computations.push({
+        id: r.computationId,
+        name: r.computationName,
+        inputs: compInputs
+      })
+      compInputs.forEach(x => plansMap.get(r.planId).inputs.add(x))
+    }
+
+    const plans = [...plansMap.values()].map(p => ({
+      planId: p.planId,
+      planName: p.planName,
+      planVersion: p.planVersion,
+      inputs: [...p.inputs].sort(),
+      computations: p.computations.map(c => ({
+        id: c.id,
+        name: c.name,
+        inputs: [...new Set(c.inputs)].sort()
+      }))
+    }))
+
+    res.json({
+      participantId,
+      allInputs: [...allSet].sort(),
+      plans
+    })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Failed to load required source inputs', detail: e.message })
   }
 })
