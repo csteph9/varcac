@@ -468,18 +468,6 @@ app.delete('/api/participants/:participantId/plans/:participantPlanId', async (r
     console.error(e)
     res.status(500).json({ error: 'Failed to detach plan', detail: e.message })
   }
-  /*
-  try {
-    await pool.execute(
-      `DELETE FROM participant_payout_history WHERE plan_id = :participantPlanId AND participant_id = :participantId`,
-      { participantPlanId, participantId }
-    )
-    res.status(204).end()
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Failed to detach plan', detail: e.message })
-  }
-  */
 })
 
 
@@ -1261,18 +1249,22 @@ function toInputDate(value) {
   return tzAdjusted.toISOString().slice(0, 10)
 }
 
-// GET /api/source-data?participantId=&label=&from=&to=&limit=&offset=
+// GET /api/source-data?participantId=&label=&recordScope=&from=&to=&limit=&offset=
 app.get('/api/source-data', async (req, res) => {
   try {
     const where = []
     const params = []
-    const { participantId, label, from, to } = req.query
+    const { participantId, label, recordScope, from, to } = req.query
 
     if (participantId && Number.isFinite(Number(participantId))) {
       where.push('participant_id = ?'); params.push(Number(participantId))
     }
     if (label && String(label).trim()) {
       where.push('label = ?'); params.push(String(label).trim())
+    }
+    if (recordScope && String(recordScope).trim()) {
+      // Case-insensitive match on record_scope
+      where.push('UPPER(record_scope) = UPPER(?)'); params.push(String(recordScope).trim())
     }
     if (from) {
       const f = toInputDate(from); if (f) { where.push('metric_date >= ?'); params.push(f) }
@@ -1286,8 +1278,12 @@ app.get('/api/source-data', async (req, res) => {
     const offset = Math.max(Number(req.query.offset ?? 0), 0)
 
     const [rows] = await pool.execute(
-      `SELECT id, participant_id AS participantId, label, description,
-              metric_date AS date, value, created_at AS createdAt, updated_at AS updatedAt
+      `SELECT id,
+              participant_id AS participantId,
+              record_scope   AS recordScope,
+              label, description,
+              metric_date    AS date,
+              value, created_at AS createdAt, updated_at AS updatedAt
          FROM source_data
          ${clause}
         ORDER BY metric_date DESC, id DESC
@@ -1295,7 +1291,6 @@ app.get('/api/source-data', async (req, res) => {
       [...params, limit, offset]
     )
 
-    // total count (for pagination if you want)
     const [[{ total }]] = await pool.execute(
       `SELECT COUNT(*) AS total FROM source_data ${clause}`, params
     )
@@ -1306,12 +1301,13 @@ app.get('/api/source-data', async (req, res) => {
   }
 })
 
-// POST /api/source-data  (single add)
+// POST /api/source-data  (single add)  -- now supports record_scope
 app.post('/api/source-data', async (req, res) => {
   try {
-    const { participantId, label, description, date, value } = req.body || {}
+    const { participantId, label, recordScope, description, date, value } = req.body || {}
     const pid = Number(participantId)
     const lbl = (label ?? '').toString().trim()
+    const scope = (recordScope ?? 'ACTUAL').toString().trim() || 'ACTUAL'  // default if omitted/blank
     const val = Number(value)
     const d = toInputDate(date)
 
@@ -1321,9 +1317,9 @@ app.post('/api/source-data', async (req, res) => {
     if (!Number.isFinite(val)) return res.status(400).json({ error: 'Invalid value' })
 
     const [ins] = await pool.execute(
-      `INSERT INTO source_data (participant_id, label, description, metric_date, value)
-       VALUES (?,?,?,?,?)`,
-      [pid, lbl, description ?? null, d, val]
+      `INSERT INTO source_data (participant_id, record_scope, label, description, metric_date, value)
+       VALUES (?,?,?,?,?,?)`,
+      [pid, scope, lbl, description ?? null, d, val]
     )
     res.status(201).json({ id: ins.insertId })
   } catch (e) {
@@ -1331,7 +1327,7 @@ app.post('/api/source-data', async (req, res) => {
   }
 })
 
-// POST /api/source-data/bulk  (CSV textarea)
+// POST /api/source-data/bulk  (CSV textarea) -- now supports an optional "Record Scope" column
 app.post('/api/source-data/bulk', async (req, res) => {
   try {
     const { csv } = req.body || {}
@@ -1347,23 +1343,20 @@ app.post('/api/source-data/bulk', async (req, res) => {
         const c = text[i]
         if (inQuotes) {
           if (c === '"') {
-            if (text[i + 1] === '"') { field += '"'; i += 2; continue } // escaped quote
+            if (text[i + 1] === '"') { field += '"'; i += 2; continue }
             inQuotes = false; i++; continue
           } else { field += c; i++; continue }
         } else {
           if (c === '"') { inQuotes = true; i++; continue }
           if (c === ',') { row.push(field); field = ''; i++; continue }
           if (c === '\n' || c === '\r') {
-            // handle CRLF or LF
             if (c === '\r' && text[i + 1] === '\n') i++
             row.push(field); rows.push(row); field = ''; row = []; i++; continue
           }
           field += c; i++; continue
         }
       }
-      // last field
       row.push(field); rows.push(row)
-      // trim possible trailing blank line
       if (rows.length && rows[rows.length - 1].length === 1 && rows[rows.length - 1][0].trim() === '') rows.pop()
       return rows
     }
@@ -1374,7 +1367,6 @@ app.post('/api/source-data/bulk', async (req, res) => {
     const header = rows[0].map(h => h.trim().toLowerCase())
     const body = rows.slice(1)
 
-    // Map flexible header names
     function idx(...alts) {
       for (const a of alts) {
         const k = a.toLowerCase()
@@ -1384,23 +1376,24 @@ app.post('/api/source-data/bulk', async (req, res) => {
       return -1
     }
 
-    const iPid  = idx('participant id','participant_id','participantid','participant')
-    const iLbl  = idx('data source label','label','source label','source_label')
-    const iDesc = idx('description','desc','notes')
-    const iDate = idx('date','metric_date','metric date')
-    const iVal  = idx('value','amount','val')
+    const iPid   = idx('participant id','participant_id','participantid','participant')
+    const iScope = idx('record scope','scope','record_scope','recordscope') // NEW (optional)
+    const iLbl   = idx('data source label','label','source label','source_label')
+    const iDesc  = idx('description','desc','notes')
+    const iDate  = idx('date','metric_date','metric date')
+    const iVal   = idx('value','amount','val')
 
     if (iPid < 0 || iLbl < 0 || iDate < 0 || iVal < 0) {
       return res.status(400).json({ error: 'Header row must include Participant ID, Label, Date, Value' })
     }
 
-    // Validate and collect
     const good = []
     const errors = []
     for (let r = 0; r < body.length; r++) {
       const row = body[r]
-      const lineNo = r + 2 // 1-based + header
+      const lineNo = r + 2
       const pid = Number(row[iPid])
+      const scope = iScope >= 0 ? (row[iScope] ?? '').toString().trim() : 'ACTUAL'
       const lbl = (row[iLbl] ?? '').toString().trim()
       const date = toInputDate(row[iDate])
       const val = Number(row[iVal])
@@ -1411,20 +1404,20 @@ app.post('/api/source-data/bulk', async (req, res) => {
       if (!date) { errors.push({ line: lineNo, error: 'Invalid date', raw: row }); continue }
       if (!Number.isFinite(val)) { errors.push({ line: lineNo, error: 'Invalid value', raw: row }); continue }
 
-      good.push({ pid, lbl, desc, date, val })
+      good.push({ pid, scope: scope || 'ACTUAL', lbl, desc, date, val })
     }
 
     if (!good.length) {
       return res.status(400).json({ error: 'No valid rows', errors })
     }
 
-    // Bulk insert
-    const placeholders = good.map(() => '(?,?,?,?,?)').join(',')
+    // Bulk insert (now includes record_scope)
+    const placeholders = good.map(() => '(?,?,?,?,?,?)').join(',')
     const params = []
-    for (const g of good) params.push(g.pid, g.lbl, g.desc, g.date, g.val)
+    for (const g of good) params.push(g.pid, g.scope, g.lbl, g.desc, g.date, g.val)
 
     await pool.execute(
-      `INSERT INTO source_data (participant_id, label, description, metric_date, value)
+      `INSERT INTO source_data (participant_id, record_scope, label, description, metric_date, value)
        VALUES ${placeholders}`,
       params
     )
@@ -1434,6 +1427,7 @@ app.post('/api/source-data/bulk', async (req, res) => {
     res.status(500).json({ error: 'Bulk insert failed', detail: e.message })
   }
 })
+
 
 // DELETE /api/source-data/:id
 app.delete('/api/source-data/:id', async (req, res) => {
@@ -1953,13 +1947,23 @@ function prettyTemplate(src = '') {
   return lines.join('\n').trim()
 }
 
-
 app.post('/api/participants/:id/comp-statement', async (req, res) => {
-
   const participantId = Number(req.params.id)
   const planIds = Array.isArray(req.body?.planIds)
     ? req.body.planIds.map(Number).filter(Number.isFinite)
     : []
+
+  // ★ NEW: normalize recordScopes
+  const recordScopesRaw = Array.isArray(req.body?.recordScopes) ? req.body.recordScopes : []
+  let recordScopes = recordScopesRaw
+    .map(s => String(s || '').trim())
+    .filter(Boolean)
+
+  // default to ACTUAL if nothing provided; if '*' present, treat as "all scopes"
+  const includeAllScopes = recordScopes.some(s => s === '*')
+  if (!includeAllScopes && recordScopes.length === 0) {
+    recordScopes = ['ACTUAL']
+  }
 
   if (!Number.isFinite(participantId)) return res.status(400).json({ error: 'Invalid participant id' })
   if (!planIds.length) return res.status(400).json({ error: 'planIds is required (non-empty array)' })
@@ -2076,23 +2080,36 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
     const directReportIds = drRows.map(r => r.id)
     const participantScopeIds = [participantId, ...directReportIds]
 
+    // ★ helper to make (UPPER(record_scope) IN (...)) clause
+    function buildScopeFilterClause(scopes) {
+      if (includeAllScopes) return { sql: '', params: [] }
+      const norm = (scopes || []).map(s => s.toUpperCase())
+      if (!norm.length) return { sql: ' AND UPPER(record_scope) = UPPER(?) ', params: ['ACTUAL'] }
+      const placeholders = norm.map(() => '?').join(',')
+      return { sql: ` AND UPPER(record_scope) IN (${placeholders}) `, params: norm }
+    }
+
     async function getSourceRows(startDate, endDate) {
       if (!startDate || !endDate) return []
       const placeholders = participantScopeIds.map(() => '?').join(',')
-      const params = [...participantScopeIds, startDate, endDate]
+      const baseParams = [...participantScopeIds, startDate, endDate]
+      const scopeFilter = buildScopeFilterClause(recordScopes)
+
       const [rows] = await conn.execute(
         `SELECT id,
                 participant_id AS participantId,
+                record_scope   AS recordScope,
                 label,
-                metric_date AS date,
+                metric_date    AS date,
                 value,
                 description
            FROM source_data
           WHERE participant_id IN (${placeholders})
             AND metric_date >= ?
             AND metric_date <= ?
+            ${scopeFilter.sql}
           ORDER BY metric_date ASC, id ASC`,
-        params
+        [...baseParams, ...scopeFilter.params]
       )
       return rows.map(r => ({
         ...r,
@@ -2112,9 +2129,7 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
       }
     }
 
-    // -----------------------------------------------------------------------
-    // Load EJS template from MariaDB (settings.setting_name = 'comp_plan_template_ejs')
-    // Honors an optional body override __TEMP_INLINE_TEMPLATE__ for quick testing
+    // ----------------- Template retrieval + safety (unchanged) -----------------
     let templateString = ''
     if (typeof req.body?.__TEMP_INLINE_TEMPLATE__ === 'string' && req.body.__TEMP_INLINE_TEMPLATE__.trim()) {
       templateString = req.body.__TEMP_INLINE_TEMPLATE__
@@ -2130,7 +2145,6 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
       templateString = (tplRows?.[0]?.setting_value || '').toString()
     }
 
-    // Require a template
     if (!templateString.trim()) {
       return res.status(500).json({
         error: "Comp plan template not configured",
@@ -2138,19 +2152,15 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
       })
     }
 
-    // 🔒 SECURITY: Validate template at render time (DB-loaded or inline override)
-    {
-      const m = String(templateString).match(FORBIDDEN)
-      if (m) {
-        return res.status(400).json({
-          error: 'Template blocked by security policy',
-          detail: `Forbidden keyword detected: ${m[0]}`
-        })
-      }
+    const m = String(templateString).match(FORBIDDEN)
+    if (m) {
+      return res.status(400).json({
+        error: 'Template blocked by security policy',
+        detail: `Forbidden keyword detected: ${m[0]}`
+      })
     }
-    // -----------------------------------------------------------------------
 
-    // Render AFTER the safety check
+    // Render AFTER the safety check; expose chosen scopes in the template context
     const html = await ejs.render(templateString, {
       generatedAt: new Date().toLocaleString(),
       participant: pt || { id: participantId },
@@ -2159,7 +2169,10 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
       sourceDataByWindow,
       appendix,
 
-      // helpers available in EJS
+      // ★ expose scopes used for this statement
+      recordScopes: includeAllScopes ? ['*'] : recordScopes,
+
+      // helpers
       toYMD,
       fmtMoney
     }, { async: true })
@@ -2622,95 +2635,126 @@ app.put('/api/settings/:name', async (req, res) => {
 })
 
 //CSV Exporter
-// GET /api/payout-history?participantIds=1,2&planIds=10,12
+// GET /api/payout-history  -> returns rows ready for CSV; now includes `record_scopes`
 app.get('/api/payout-history', async (req, res) => {
   try {
-    // Parse filters
+    // Parse filters (same as before)
     const pids = String(req.query.participantIds || '')
-      .split(',')
-      .map((s) => Number(s))
-      .filter(Number.isFinite)
+      .split(',').map(s => Number(s)).filter(Number.isFinite)
 
     const plids = String(req.query.planIds || '')
-      .split(',')
-      .map((s) => Number(s))
-      .filter(Number.isFinite)
+      .split(',').map(s => Number(s)).filter(Number.isFinite)
 
     const where = []
     const args = []
-    if (pids.length) {
-      where.push(`pph.participant_id IN (${pids.map(() => '?').join(',')})`)
-      args.push(...pids)
-    }
-    if (plids.length) {
-      where.push(`pph.plan_id IN (${plids.map(() => '?').join(',')})`)
-      args.push(...plids)
-    }
+    if (pids.length) { where.push(`pph.participant_id IN (${pids.map(()=>'?').join(',')})`); args.push(...pids) }
+    if (plids.length) { where.push(`pph.plan_id IN (${plids.map(()=>'?').join(',')})`); args.push(...plids) }
 
-    // 1) Fetch history rows (use correct period column names)
+    // 1) Pull the payout rows (base dataset)
     const sqlHistory = `
-      SELECT pph.*
+      SELECT
+        pph.id,
+        pph.participant_id,
+        pph.plan_id,
+        pph.period_label,
+        pph.period_start,
+        pph.period_end,
+        COALESCE(pph.due_date, pph.period_end) AS due_date,
+        pph.output_label,
+        pph.amount,
+        pph.created_at
       FROM participant_payout_history pph
       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
       ORDER BY pph.period_start, pph.period_end, pph.id
     `
     const [rows] = await pool.execute(sqlHistory, args)
-    if (!rows.length) return res.json([])
+    if (!rows.length) {
+      // Keep same shape your CSV layer expects
+      return res.json([])
+    }
 
-    // 2) Resolve names for the IDs present in those rows
+    // 2) Resolve participant & plan names (as you had before)
     const pidSet = new Set(rows.map(r => r.participant_id).filter(v => v != null))
     const plidSet = new Set(rows.map(r => r.plan_id).filter(v => v != null))
 
-    // plan_participant → "First Last"
     let pMap = new Map()
     if (pidSet.size) {
       const pidList = Array.from(pidSet)
       const [pNameRows] = await pool.execute(
-        `
-        SELECT
-          pp.id,
-          TRIM(CONCAT_WS(' ', pp.first_name, pp.last_name)) AS full_name
-        FROM plan_participant pp
-        WHERE pp.id IN (${pidList.map(() => '?').join(',')})
-        `,
+        `SELECT id, TRIM(CONCAT_WS(' ', first_name, last_name)) AS full_name
+           FROM plan_participant
+          WHERE id IN (${pidList.map(()=>'?').join(',')})`,
         pidList
       )
       pMap = new Map(pNameRows.map(r => [r.id, r.full_name || `Participant ${r.id}`]))
     }
 
-    // comp_plan → name
     let planMap = new Map()
     if (plidSet.size) {
       const plidList = Array.from(plidSet)
       const [planNameRows] = await pool.execute(
-        `
-        SELECT cp.id, cp.name
-        FROM comp_plan cp
-        WHERE cp.id IN (${plidList.map(() => '?').join(',')})
-        `,
+        `SELECT id, name FROM comp_plan WHERE id IN (${plidList.map(()=>'?').join(',')})`,
         plidList
       )
       planMap = new Map(planNameRows.map(r => [r.id, r.name || `Plan ${r.id}`]))
     }
 
-    // 3) Replace IDs with names (as requested)
+    // 3) Aggregate DISTINCT record_scope per (participant_id, plan_id, period_start, period_end)
+    //    We join source_data on participant_id and date range; then group once.
+    const scopeWhere = []
+    const scopeArgs = []
+    if (pids.length) { scopeWhere.push(`pph.participant_id IN (${pids.map(()=>'?').join(',')})`); scopeArgs.push(...pids) }
+    if (plids.length) { scopeWhere.push(`pph.plan_id IN (${plids.map(()=>'?').join(',')})`); scopeArgs.push(...plids) }
+
+    const [scopeRows] = await pool.execute(
+      `
+      SELECT
+        pph.participant_id,
+        pph.plan_id,
+        pph.period_start,
+        pph.period_end,
+        GROUP_CONCAT(DISTINCT UPPER(sd.record_scope) ORDER BY UPPER(sd.record_scope) SEPARATOR ', ') AS record_scopes
+      FROM participant_payout_history pph
+      LEFT JOIN source_data sd
+        ON sd.participant_id = pph.participant_id
+       AND sd.metric_date   >= pph.period_start
+       AND sd.metric_date   <= pph.period_end
+      ${scopeWhere.length ? 'WHERE ' + scopeWhere.join(' AND ') : ''}
+      GROUP BY pph.participant_id, pph.plan_id, pph.period_start, pph.period_end
+      `,
+      scopeArgs
+    )
+
+    // Build quick lookup by composite key
+    const toKey = (r) =>
+      `${r.participant_id}|${r.plan_id}|${new Date(r.period_start).toISOString().slice(0,10)}|${new Date(r.period_end).toISOString().slice(0,10)}`
+    const scopesByKey = new Map(scopeRows.map(r => [toKey(r), r.record_scopes || '']))
+
+    // 4) Final mapping: replace IDs with names & attach `record_scopes`
     const out = rows.map(r => {
-      const participantName = pMap.get(r.participant_id) || String(r.participant_id ?? '')
-      const planName        = planMap.get(r.plan_id)      || String(r.plan_id ?? '')
-      const { participant_id, plan_id, ...rest } = r
+      const key = toKey(r)
       return {
-        ...rest,
-        participant_id: participantName, // now a human name
-        plan_id: planName,               // now a plan name
+        participant: pMap.get(r.participant_id) || String(r.participant_id ?? ''),
+        plan:        planMap.get(r.plan_id)      || String(r.plan_id ?? ''),
+        period_label: r.period_label || null,
+        period_start: new Date(r.period_start).toISOString().slice(0,10),
+        period_end:   new Date(r.period_end).toISOString().slice(0,10),
+        due_date:     r.due_date ? new Date(r.due_date).toISOString().slice(0,10) : null,
+        output_label: r.output_label,
+        amount:       Number(r.amount ?? 0),
+        created_at:   r.created_at,
+        record_scopes: scopesByKey.get(key) || ''  // ← NEW CSV column
       }
     })
 
+    // If you stream CSV here, keep doing that; if the Reporting Vue does CSV, just return JSON:
     res.json(out)
   } catch (e) {
     console.error('GET /api/payout-history failed:', e)
     res.status(500).json({ error: 'Failed to fetch payout history', detail: e.message })
   }
 })
+
 
 
 // GET /api/participants/:id/required-source-inputs
