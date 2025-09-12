@@ -864,5 +864,110 @@ DELIMITER ;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+-- === Bump 'last_mod' support and lightweight triggers ===
+-- Requires the existing `settings` table with UNIQUE(setting_name)
+
+DELIMITER //
+
+-- 1) Stored procedure used by all triggers
+DROP PROCEDURE IF EXISTS bump_last_mod//
+CREATE PROCEDURE bump_last_mod()
+MODIFIES SQL DATA
+BEGIN
+  INSERT INTO settings (setting_name, setting_value)
+  VALUES ('last_mod', CURRENT_TIMESTAMP())
+  ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value);
+END//
+
+-- 2) Triggers (drop & recreate)
+-- comp_plan
+DROP TRIGGER IF EXISTS `trg_comp_plan_ai`//
+CREATE TRIGGER `trg_comp_plan_ai` AFTER INSERT ON `comp_plan`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_comp_plan_au`//
+CREATE TRIGGER `trg_comp_plan_au` AFTER UPDATE ON `comp_plan`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_comp_plan_ad`//
+CREATE TRIGGER `trg_comp_plan_ad` AFTER DELETE ON `comp_plan`
+FOR EACH ROW CALL bump_last_mod()//
+
+-- computation_definition
+DROP TRIGGER IF EXISTS `trg_computation_definition_ai`//
+CREATE TRIGGER `trg_computation_definition_ai` AFTER INSERT ON `computation_definition`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_computation_definition_au`//
+CREATE TRIGGER `trg_computation_definition_au` AFTER UPDATE ON `computation_definition`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_computation_definition_ad`//
+CREATE TRIGGER `trg_computation_definition_ad` AFTER DELETE ON `computation_definition`
+FOR EACH ROW CALL bump_last_mod()//
+
+-- participant_payout_history
+DROP TRIGGER IF EXISTS `trg_participant_payout_history_ai`//
+CREATE TRIGGER `trg_participant_payout_history_ai` AFTER INSERT ON `participant_payout_history`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_participant_payout_history_au`//
+CREATE TRIGGER `trg_participant_payout_history_au` AFTER UPDATE ON `participant_payout_history`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_participant_payout_history_ad`//
+CREATE TRIGGER `trg_participant_payout_history_ad` AFTER DELETE ON `participant_payout_history`
+FOR EACH ROW CALL bump_last_mod()//
+
+-- participant_plan
+DROP TRIGGER IF EXISTS `trg_participant_plan_ai`//
+CREATE TRIGGER `trg_participant_plan_ai` AFTER INSERT ON `participant_plan`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_participant_plan_au`//
+CREATE TRIGGER `trg_participant_plan_au` AFTER UPDATE ON `participant_plan`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_participant_plan_ad`//
+CREATE TRIGGER `trg_participant_plan_ad` AFTER DELETE ON `participant_plan`
+FOR EACH ROW CALL bump_last_mod()//
+
+-- plan_computation
+DROP TRIGGER IF EXISTS `trg_plan_computation_ai`//
+CREATE TRIGGER `trg_plan_computation_ai` AFTER INSERT ON `plan_computation`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_plan_computation_au`//
+CREATE TRIGGER `trg_plan_computation_au` AFTER UPDATE ON `plan_computation`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_plan_computation_ad`//
+CREATE TRIGGER `trg_plan_computation_ad` AFTER DELETE ON `plan_computation`
+FOR EACH ROW CALL bump_last_mod()//
+
+-- plan_participant
+DROP TRIGGER IF EXISTS `trg_plan_participant_ai`//
+CREATE TRIGGER `trg_plan_participant_ai` AFTER INSERT ON `plan_participant`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_plan_participant_au`//
+CREATE TRIGGER `trg_plan_participant_au` AFTER UPDATE ON `plan_participant`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_plan_participant_ad`//
+CREATE TRIGGER `trg_plan_participant_ad` AFTER DELETE ON `plan_participant`
+FOR EACH ROW CALL bump_last_mod()//
+
+-- plan_payout_period
+DROP TRIGGER IF EXISTS `trg_plan_payout_period_ai`//
+CREATE TRIGGER `trg_plan_payout_period_ai` AFTER INSERT ON `plan_payout_period`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_plan_payout_period_au`//
+CREATE TRIGGER `trg_plan_payout_period_au` AFTER UPDATE ON `plan_payout_period`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_plan_payout_period_ad`//
+CREATE TRIGGER `trg_plan_payout_period_ad` AFTER DELETE ON `plan_payout_period`
+FOR EACH ROW CALL bump_last_mod()//
+
+-- source_data
+DROP TRIGGER IF EXISTS `trg_source_data_ai`//
+CREATE TRIGGER `trg_source_data_ai` AFTER INSERT ON `source_data`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_source_data_au`//
+CREATE TRIGGER `trg_source_data_au` AFTER UPDATE ON `source_data`
+FOR EACH ROW CALL bump_last_mod()//
+DROP TRIGGER IF EXISTS `trg_source_data_ad`//
+CREATE TRIGGER `trg_source_data_ad` AFTER DELETE ON `source_data`
+FOR EACH ROW CALL bump_last_mod()//
+
+DELIMITER ;
 
 -- Dump completed on 2025-09-11 18:47:27
