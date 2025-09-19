@@ -2178,6 +2178,10 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
     }, { async: true })
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8')
+
+    const base64Encoded = Buffer.from(html, "utf-8").toString("base64");
+    console.log(base64Encoded);
+
     return res.status(200).send(html)
 
   } catch (e) {
