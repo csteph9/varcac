@@ -11,10 +11,11 @@ import morgan from 'morgan';
 import { pool } from './db.js'
 import { Parser } from 'expr-eval'
 import _ from 'lodash'
-import PDFDocument from 'pdfkit'
+//import PDFDocument from 'pdfkit'
 import { spawn } from 'child_process'
 import multer from 'multer'
 import fs from 'fs'
+import fsp from 'node:fs/promises'
 import os from 'os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -278,20 +279,37 @@ app.get('/api/plans/:id/periods', async (req, res) => {
 })
 
 // LIST plans
-app.get('/api/plans', async (_req, res) => {
+app.get('/api/plans', async (req, res) => {
   try {
+    // default to active (1) unless explicitly set to 0
+    const q = req.query?.isActive;
+    const isActive =
+      q === '0' ? 0 :
+      q === '1' ? 1 : 1;
+
     const [rows] = await pool.execute(
-      `SELECT id, name, version, effective_start AS effectiveStart, payout_frequency AS payoutFrequency,
-              effective_end AS effectiveEnd, description, created_at AS createdAt
+      `SELECT
+         id,
+         name,
+         version,
+         effective_start AS effectiveStart,
+         payout_frequency AS payoutFrequency,
+         effective_end   AS effectiveEnd,
+         description,
+         created_at      AS createdAt,
+         is_active       AS isActive
        FROM comp_plan
-       ORDER BY created_at DESC`
-    )
-    res.json(rows)
+       WHERE is_active = ?
+       ORDER BY created_at DESC`,
+      [isActive]
+    );
+
+    res.json(rows);
   } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Failed to fetch plans' })
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch plans' });
   }
-})
+});
 
 // GET plan with elements
 app.get('/api/plans/:id', async (req, res) => {
@@ -299,7 +317,7 @@ app.get('/api/plans/:id', async (req, res) => {
     const id = Number(req.params.id)
     const [[plan]] = await pool.execute(
       `SELECT id, name, version, effective_start AS effectiveStart, payout_frequency AS payoutFrequency,
-              effective_end AS effectiveEnd, description, created_at AS createdAt
+              effective_end AS effectiveEnd, description, created_at AS createdAt, is_active as isActive
        FROM comp_plan WHERE id = :id`,
       { id }
     )
@@ -391,6 +409,10 @@ app.get('/api/participants', async (_req, res) => {
 app.get('/api/participants/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
+    // default to active unless explicitly 0
+    const q = req.query?.isActive
+    const isActive = q === '0' ? 0 : 1
+
     const [[participant]] = await pool.execute(
       `SELECT id,
               first_name AS firstName,
@@ -400,7 +422,8 @@ app.get('/api/participants/:id', async (req, res) => {
               effective_start AS effectiveStart,
               effective_end   AS effectiveEnd,
               created_at AS createdAt
-       FROM plan_participant WHERE id = :id`, { id }
+       FROM plan_participant WHERE id = :id`,
+      { id }
     )
     if (!participant) return res.status(404).json({ error: 'Participant not found' })
 
@@ -408,15 +431,18 @@ app.get('/api/participants/:id', async (req, res) => {
       `SELECT pp.id,
               cp.id AS planId,
               cp.name, cp.version,
-              cp.effective_start AS planEffectiveStart,
-              cp.effective_end   AS planEffectiveEnd,
-              pp.effective_start AS assignmentEffectiveStart,
-              pp.effective_end   AS assignmentEffectiveEnd,
-              pp.created_at      AS attachedAt
+              cp.is_active           AS isActive,              -- expose flag
+              cp.effective_start     AS planEffectiveStart,
+              cp.effective_end       AS planEffectiveEnd,
+              pp.effective_start     AS assignmentEffectiveStart,
+              pp.effective_end       AS assignmentEffectiveEnd,
+              pp.created_at          AS attachedAt
        FROM participant_plan pp
        JOIN comp_plan cp ON cp.id = pp.plan_id
-       WHERE pp.participant_id = :id 
-       ORDER BY pp.created_at DESC`, { id }
+       WHERE pp.participant_id = :id
+         AND cp.is_active = :isActive                             -- filter active/archived
+       ORDER BY pp.created_at DESC`,
+      { id, isActive }
     )
 
     res.json({ participant, plans })
@@ -1824,13 +1850,15 @@ app.get('/api/participants/:id/payout-history', async (req, res) => {
   }
 
   try {
-    const where = ['pph.participant_id = ?']
-    const params = [participantId]
-    const { planId, from, to } = req.query
+    // default to Active unless explicitly 0
+    const q = req.query?.isActive
+    const isActive = q === '0' ? 0 : 1
 
-    if (planId && Number.isFinite(Number(planId))) {
-      where.push('pph.plan_id = ?'); params.push(Number(planId))
-    }
+    const where = ['pph.participant_id = ?', 'cp.is_active = ?']
+    const params = [participantId, isActive]
+
+    const { planId, from, to } = req.query
+    if (planId && Number.isFinite(Number(planId))) { where.push('pph.plan_id = ?'); params.push(Number(planId)) }
     const f = toInputDate(from); if (f) { where.push('pph.period_start >= ?'); params.push(f) }
     const t = toInputDate(to);   if (t) { where.push('pph.period_end   <= ?'); params.push(t) }
 
@@ -1838,25 +1866,26 @@ app.get('/api/participants/:id/payout-history', async (req, res) => {
 
     const [rows] = await pool.execute(
       `SELECT
-        pph.id                 AS id,
-        pph.plan_id            AS planId,
-        cp.name                AS planName,
-        cp.version             AS planVersion,
-        pph.period_start       AS periodStart,
-        pph.period_end         AS periodEnd,
-        pph.period_label       AS periodLabel,
-        pph.due_date           AS dueDate,
-        pph.output_label       AS outputLabel,
-        pph.amount             AS amount,
-        pph.computation_id     AS computationId,
-        cd.name                AS computationName,
-        pph.payload            AS payload,
-        pph.created_at         AS createdAt
-      FROM participant_payout_history pph
-      JOIN comp_plan cp ON cp.id = pph.plan_id
-      LEFT JOIN computation_definition cd ON cd.id = pph.computation_id
-      ${clause}
-      ORDER BY pph.plan_id ASC, pph.period_start ASC, pph.id ASC`,
+         pph.id                 AS id,
+         pph.plan_id            AS planId,
+         cp.name                AS planName,
+         cp.version             AS planVersion,
+         cp.is_active           AS isActive,     -- expose flag
+         pph.period_start       AS periodStart,
+         pph.period_end         AS periodEnd,
+         pph.period_label       AS periodLabel,
+         pph.due_date           AS dueDate,
+         pph.output_label       AS outputLabel,
+         pph.amount             AS amount,
+         pph.computation_id     AS computationId,
+         cd.name                AS computationName,
+         pph.payload            AS payload,
+         pph.created_at         AS createdAt
+       FROM participant_payout_history pph
+       JOIN comp_plan cp ON cp.id = pph.plan_id
+       LEFT JOIN computation_definition cd ON cd.id = pph.computation_id
+       ${clause}
+       ORDER BY pph.plan_id ASC, pph.period_start ASC, pph.id ASC`,
       params
     )
 
@@ -1868,6 +1897,7 @@ app.get('/api/participants/:id/payout-history', async (req, res) => {
           planId: r.planId,
           planName: r.planName,
           planVersion: r.planVersion,
+          isActive: Number(r.isActive),
           periods: []
         })
       }
@@ -1877,7 +1907,7 @@ app.get('/api/participants/:id/payout-history', async (req, res) => {
       let period = plan.periods.find(p => p._key === key)
       if (!period) {
         period = {
-          _key: key, // internal
+          _key: key,
           periodStart: r.periodStart,
           periodEnd: r.periodEnd,
           periodLabel: r.periodLabel || null,
@@ -1899,11 +1929,7 @@ app.get('/api/participants/:id/payout-history', async (req, res) => {
       period.total += Number(r.amount || 0)
     }
 
-    const payload = {
-      participantId,
-      plans: Array.from(plansMap.values())
-    }
-    res.json(payload)
+    res.json({ participantId, plans: Array.from(plansMap.values()) })
   } catch (e) {
     res.status(500).json({ error: 'Failed to load payout history', detail: e.message })
   }
@@ -2397,7 +2423,7 @@ app.get('/api/admin/backup', async (req, res) => {
 import { Transform } from 'node:stream'
 import { StringDecoder } from 'node:string_decoder'
 import { pipeline as pipe } from 'node:stream/promises'
-import fsp from 'node:fs/promises'
+
 
 async function ensureUniqueIndexOnSettings(pool) {
   const [rows] = await pool.execute('SHOW INDEX FROM `settings`')
@@ -2556,6 +2582,92 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
     // Best-effort cleanup if something failed before we opened the stream
     try { await fsp.rm(dumpPath, { force: true }) } catch {}
     res.status(500).json({ error: 'Restore failed', detail: e.message })
+  }
+})
+
+app.post('/api/admin/factory-reset', async (req, res) => {
+  const confirm = req.body?.confirm
+  if (confirm !== 'FACTORY') {
+    return res.status(400).json({ error: 'Confirmation required: type FACTORY' })
+  }
+
+  const DB_HOST = process.env.DB_HOST
+  const DB_PORT = Number(process.env.DB_PORT || 3306)
+  const DB_USER = process.env.DB_USER
+  const DB_PASSWORD = process.env.DB_PASSWORD
+  const DB_NAME = process.env.DB_NAME
+
+  // Where to read the initial schema/seed
+  const schemaPath = process.env.DB_INIT_PATH || path.join(__dirname, 'db_init.sql')
+  console.log(schemaPath);
+  try {
+    // Sanity: schema file present?
+    await fsp.access(schemaPath, fs.constants.R_OK)
+
+    // Step 1: Drop & recreate the database
+    await new Promise((resolve, reject) => {
+      const args = ['-h', DB_HOST, '-P', String(DB_PORT), '-u', DB_USER]
+      if (DB_PASSWORD) args.push(`-p${DB_PASSWORD}`)
+      args.push('-e', `DROP DATABASE IF EXISTS \`${DB_NAME}\`; CREATE DATABASE \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`)
+      const mysql = spawn('mysql', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      let stderr = ''
+      mysql.stderr.on('data', d => { stderr += d.toString() })
+      mysql.on('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(stderr || `mysql exited with ${code}`))
+      })
+    })
+
+    // Step 2: Import db_init.sql into the fresh DB
+    await new Promise((resolve, reject) => {
+      const args = ['-h', DB_HOST, '-P', String(DB_PORT), '-u', DB_USER]
+      if (DB_PASSWORD) args.push(`-p${DB_PASSWORD}`)
+      args.push('--force', DB_NAME)
+
+      const mysql = spawn('mysql', args, { stdio: ['pipe', 'pipe', 'pipe'] })
+      let stderr = ''
+      mysql.stderr.on('data', d => { stderr += d.toString() })
+      mysql.stdin.on('error', (err) => {
+        if (err?.code !== 'EPIPE') console.warn('mysql.stdin error:', err?.message || err)
+      })
+
+      const rs = fs.createReadStream(schemaPath)
+      rs.on('error', reject)
+      rs.pipe(mysql.stdin)
+
+      mysql.on('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(stderr || `mysql exited with ${code}`))
+      })
+    })
+
+    // Step 3: Make sure settings uniqueness exists (parity with restore flow)
+    await ensureUniqueIndexOnSettings(pool)
+
+    // Step 4: Record the reset in `settings`
+    try {
+      const now = new Date()
+      const pad = (n) => String(n).padStart(2, '0')
+      const ts = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+      const value = `Factory reset executed at ${ts} from db_init.sql`
+
+      const [rows] = await pool.execute(
+        'SELECT id FROM settings WHERE setting_name = ? ORDER BY id DESC LIMIT 1',
+        ['current_restore']
+      )
+      if (rows.length) {
+        await pool.execute('UPDATE settings SET setting_value = ? WHERE id = ?', [value, rows[0].id])
+      } else {
+        await pool.execute('INSERT INTO settings (setting_name, setting_value) VALUES (?, ?)', ['current_restore', value])
+      }
+    } catch (e) {
+      console.warn('Factory reset completed but failed to write current_restore setting:', e.message)
+    }
+
+    res.json({ ok: true })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Factory reset failed', detail: e.message })
   }
 })
 
@@ -2854,4 +2966,38 @@ app.get('/api/participants/:id/required-source-inputs', async (req, res) => {
     console.error(e)
     res.status(500).json({ error: 'Failed to load required source inputs', detail: e.message })
   }
+})
+
+
+
+app.patch('/api/plans/:id/active', async (req, res) => {
+  const id = Number(req.params.id)
+  const isActive = Number(req.body?.isActive)
+  if (!Number.isInteger(id) || (isActive !== 0 && isActive !== 1)) {
+    return res.status(400).json({ error: 'Invalid id or isActive (must be 0 or 1)' })
+  }
+  try {
+    const [result] = await pool.execute(
+      'UPDATE comp_plan SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [isActive, id]
+    )
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Plan not found' })
+    }
+    res.json({ ok: true, id, isActive })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Failed to update is_active' })
+  }
+})
+
+// Optional convenience endpoints:
+app.post('/api/plans/:id/archive', async (req, res) => {
+  req.body = { isActive: 0 }
+  return app._router.handle(req, res, () => {}, 'patch', `/api/plans/${req.params.id}/active`)
+})
+
+app.post('/api/plans/:id/unarchive', async (req, res) => {
+  req.body = { isActive: 1 }
+  return app._router.handle(req, res, () => {}, 'patch', `/api/plans/${req.params.id}/active`)
 })
