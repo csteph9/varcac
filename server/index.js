@@ -21,6 +21,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ejs from 'ejs'
 import { rateLimit, ipKeyGenerator } from 'express-rate-limit'
+import { Transform } from 'node:stream'
+import { StringDecoder } from 'node:string_decoder'
+import { pipeline as pipe } from 'node:stream/promises'
 
 const baseKey = (req) => (req.user?.id ? `u:${req.user.id}` : ipKeyGenerator(req))
 
@@ -28,9 +31,16 @@ const upload = multer({ dest: os.tmpdir() })
 
 const lodashTemplate = _.template
 
+const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import|Buffer|setImmediate|setInterval|setTimeout|clearImmediate|clearInterval|clearTimeout|console|Reflect|Proxy|GeneratorFunction|Object|Object\.assign|Object\.defineProperty|Object\.defineProperties|Object\.setPrototypeOf|Object\.getPrototypeOf|Object\.create|import\.meta|require\.resolve|Intl|Atomics|SharedArrayBuffer|Worker|MessageChannel|performance)\b/
+const nameRegex = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+// helpers
+const toDateStr = (v) => (v ? String(v).slice(0, 10) : null);
+const safeLabel = (v) => (v == null ? null : String(v).slice(0, 120));
+
 
 const app = express();
-app.set('trust proxy', true) // if behind a proxy/load balancer
+app.set('trust proxy', true)
 const PORT = process.env.PORT || 3001;
 
 const parser = new Parser({ operators: { logical: true, comparison: true, ternary: true } })
@@ -105,7 +115,7 @@ app.listen(PORT, () => {
 });
 
 
-// --- helpers (drop near top, reuse in calc route too) ---
+// --- pad helpers
 const pad2 = (n) => String(n).padStart(2, '0')
 
 // Accepts Date OR string. Returns a Date (UTC midnight) or null.
@@ -185,10 +195,6 @@ app.post('/api/participants', async (req, res) => {
   }
 })
 
-// helpers
-const toDateStr = (v) => (v ? String(v).slice(0, 10) : null);
-const safeLabel = (v) => (v == null ? null : String(v).slice(0, 120));
-
 app.put('/api/plans/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -252,11 +258,11 @@ app.put('/api/plans/:id', async (req, res) => {
   } catch (e) {
     try { await conn.rollback(); } catch {}
     conn.release();
+    logError('PLAN_UPDATE_FAIL', e);
     res.status(500).json({ error: 'Failed to update plan', detail: e.message });
   }
 });
 
-// GET /api/plans/:id/periods
 app.get('/api/plans/:id/periods', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' })
@@ -274,11 +280,12 @@ app.get('/api/plans/:id/periods', async (req, res) => {
     res.json({ periods: rows })
   } catch (e) {
     conn.release()
+    console.log(e);
+    logError('PERIOD_LOAD_FAIL', e);
     res.status(500).json({ error: 'Failed to load periods', detail: e.message })
   }
 })
 
-// LIST plans
 app.get('/api/plans', async (req, res) => {
   try {
     // default to active (1) unless explicitly set to 0
@@ -307,11 +314,11 @@ app.get('/api/plans', async (req, res) => {
     res.json(rows);
   } catch (err) {
     console.error(err);
+    logError('FETCH_PLAN_FAIL', e);
     res.status(500).json({ error: 'Failed to fetch plans' });
   }
 });
 
-// GET plan with elements
 app.get('/api/plans/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
@@ -336,12 +343,12 @@ app.get('/api/plans/:id', async (req, res) => {
     )
     res.json({ plan, elements })
   } catch (err) {
-    console.error(err)
+    console.error(err);
+    logError('PLAN_FETCH_DETAIL_FAIL', err)
     res.status(500).json({ error: 'Failed to fetch plan detail' })
   }
 })
 
-// UPDATE plan
 app.put('/api/plans/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
@@ -368,7 +375,6 @@ app.put('/api/plans/:id', async (req, res) => {
 })
 
 
-// DELETE a plan (will auto-detach elements via FK ON DELETE CASCADE)
 app.delete('/api/plans/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
@@ -376,15 +382,10 @@ app.delete('/api/plans/:id', async (req, res) => {
     return res.status(204).end()
   } catch (err) {
     console.error(err)
+    logError('DELETE_PLAN_FAIL', e);
     res.status(500).json({ error: 'Failed to delete plan', detail: err.message })
   }
 })
-
-
-const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import|Buffer|setImmediate|setInterval|setTimeout|clearImmediate|clearInterval|clearTimeout|console|Reflect|Proxy|GeneratorFunction|Object|Object\.assign|Object\.defineProperty|Object\.defineProperties|Object\.setPrototypeOf|Object\.getPrototypeOf|Object\.create|import\.meta|require\.resolve|Intl|Atomics|SharedArrayBuffer|Worker|MessageChannel|performance)\b/
-const nameRegex = /^[A-Za-z_][A-Za-z0-9_]*$/
-
-
 
 app.get('/api/participants', async (_req, res) => {
   try {
@@ -401,11 +402,11 @@ app.get('/api/participants', async (_req, res) => {
     res.json(rows)
   } catch (e) {
     console.error(e)
+    logError('PARTICIPANTS_FETCH_FAIL', e);
     res.status(500).json({ error: 'Failed to fetch participants' })
   }
 })
 
-// GET participant + attached plans
 app.get('/api/participants/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
@@ -448,12 +449,11 @@ app.get('/api/participants/:id', async (req, res) => {
     res.json({ participant, plans })
   } catch (e) {
     console.error(e)
+    logError('PARTICIPANT_DETAIL_FETCH_FAIL', e);
     res.status(500).json({ error: 'Failed to fetch participant detail' })
   }
 })
 
-
-// ATTACH plan to participant
 app.post('/api/participants/:id/plans', async (req, res) => {
   try {
     const participantId = Number(req.params.id)
@@ -466,14 +466,13 @@ app.post('/api/participants/:id/plans', async (req, res) => {
     res.status(201).json({ ok: true })
   } catch (e) {
     // duplicate assignment
+    logError('PLAN_ALREADY_ATTACHED_FAIL', e)
     if (e?.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Plan already attached' })
     console.error(e)
     res.status(400).json({ error: 'Failed to attach plan', detail: e.message })
   }
 })
 
-
-// DETACH plan from participant
 app.delete('/api/participants/:participantId/plans/:participantPlanId', async (req, res) => {
   const participantId = Number(req.params.participantId)
   const participantPlanId = Number(req.params.participantPlanId)
@@ -492,192 +491,11 @@ app.delete('/api/participants/:participantId/plans/:participantPlanId', async (r
     res.status(204).end()
   } catch (e) {
     console.error(e)
+    logError('DETACH_PLAN_FAIL', e);
     res.status(500).json({ error: 'Failed to detach plan', detail: e.message })
   }
 })
 
-
-// LIST metrics (optional filters)
-app.get('/api/metrics', async (req, res) => {
-  try {
-    const { participantId, elementDefinitionId, from, to } = req.query
-    const where = []
-    const params = {}
-    if (participantId) { where.push('pev.participant_id = :participantId'); params.participantId = Number(participantId) }
-    if (elementDefinitionId) { where.push('pev.element_definition_id = :elementDefinitionId'); params.elementDefinitionId = Number(elementDefinitionId) }
-    if (from) { where.push('pev.metric_date >= :from'); params.from = from }
-    if (to) { where.push('pev.metric_date <= :to'); params.to = to }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-
-    const [rows] = await pool.execute(
-      `SELECT
-         pev.id, pev.metric_date AS metricDate, pev.value,
-         p.id AS participantId, p.first_name AS firstName, p.last_name AS lastName,
-         ed.id AS elementDefinitionId, ed.name AS elementName, ed.element_type AS elementType, ed.unit
-       FROM participant_element_value pev
-       JOIN plan_participant p ON p.id = pev.participant_id
-       JOIN element_definition ed ON ed.id = pev.element_definition_id
-       ${whereSql}
-       ORDER BY pev.metric_date DESC, pev.id DESC`,
-      params
-    )
-    res.json(rows)
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Failed to fetch metrics' })
-  }
-})
-
-// CREATE a metric (insert or upsert by unique key)
-app.post('/api/metrics', async (req, res) => {
-  try {
-    const { participantId, elementDefinitionId, metricDate, value } = req.body
-    await pool.execute(
-      `INSERT INTO participant_element_value
-         (participant_id, element_definition_id, metric_date, value)
-       VALUES (:participantId, :elementDefinitionId, :metricDate, :value)
-       ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP`,
-      { participantId, elementDefinitionId, metricDate, value }
-    )
-    res.status(201).json({ ok: true })
-  } catch (e) {
-    console.error(e)
-    res.status(400).json({ error: 'Failed to save metric', detail: e.message })
-  }
-})
-
-// DELETE a metric row
-app.delete('/api/metrics/:id', async (req, res) => {
-  try {
-    const id = Number(req.params.id)
-    await pool.execute('DELETE FROM participant_element_value WHERE id = :id', { id })
-    res.status(204).end()
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Failed to delete metric', detail: e.message })
-  }
-})
-
-
-// BULK UPSERT metrics from CSV text
-app.post('/api/metrics/bulk', async (req, res) => {
-  try {
-    const { csv, hasHeader = false } = req.body
-    if (!csv || typeof csv !== 'string') {
-      return res.status(400).json({ error: 'Missing csv string in body' })
-    }
-
-    // Very simple CSV parsing (no quotes/escapes). One row per line, comma-delimited.
-    const lines = csv
-      .split(/\r?\n/)
-      .map(l => l.trim())
-      .filter(l => l.length > 0)
-
-    let start = 0
-    if (hasHeader) start = 1 // skip the first line
-
-    // Collect unique participant ids and element names for lookups
-    const rows = []
-    const participantIds = new Set()
-    const elementNames = new Set()
-
-    for (let i = start; i < lines.length; i++) {
-      const raw = lines[i]
-      const parts = raw.split(',').map(s => s.trim())
-      if (parts.length < 4) {
-        rows.push({ line: i + 1, raw, status: 'error', message: 'Expected 4 columns' })
-        continue
-      }
-      const [participantIdStr, elementName, metricDate, valueStr] = parts
-      const participantId = Number(participantIdStr)
-      const value = Number(valueStr)
-
-      rows.push({ line: i + 1, raw, participantId, elementName, metricDate, value, status: 'pending' })
-      if (!Number.isNaN(participantId)) participantIds.add(participantId)
-      if (elementName) elementNames.add(elementName)
-    }
-
-    if (rows.length === 0) return res.json({ total: 0, inserted: 0, updated: 0, errors: [] })
-
-    // Lookup participants that exist
-    const [participants] = await pool.execute(
-      `SELECT id FROM plan_participant WHERE id IN (${[...participantIds].map((_,i)=>`:p${i}`).join(',')})`,
-      Object.fromEntries([...participantIds].map((v,i)=>[`p${i}`, v]))
-    )
-    const participantSet = new Set(participants.map(p => p.id))
-
-    // Lookup element definitions by NAME (element code)
-    const nameParams = Object.fromEntries([...elementNames].map((v,i)=>[`n${i}`, v]))
-    const [elements] = await pool.execute(
-      `SELECT id, name FROM element_definition WHERE name IN (${[...elementNames].map((_,i)=>`:n${i}`).join(',')})`,
-      nameParams
-    )
-    const elementByName = new Map(elements.map(e => [e.name, e.id]))
-
-    // Prepare values to insert
-    const good = []
-    const errors = []
-    for (const r of rows) {
-      if (r.status === 'error') { errors.push(r); continue }
-      if (!participantSet.has(r.participantId)) {
-        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Unknown participant_id ${r.participantId}` })
-        continue
-      }
-      const edId = elementByName.get(r.elementName)
-      if (!edId) {
-        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Unknown element name '${r.elementName}'` })
-        continue
-      }
-      if (!r.metricDate || !/^\d{4}-\d{2}-\d{2}$/.test(r.metricDate)) {
-        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Bad date '${r.metricDate}', expected YYYY-MM-DD` })
-        continue
-      }
-      if (Number.isNaN(r.value)) {
-        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Bad number value '${r.value}'` })
-        continue
-      }
-      good.push([r.participantId, edId, r.metricDate, r.value])
-    }
-
-    if (good.length === 0) {
-      return res.status(400).json({ total: rows.length, inserted: 0, updated: 0, errors })
-    }
-
-    // Batch insert with upsert
-    // unique key is (participant_id, element_definition_id, metric_date)
-    const valuesSql = good.map((_, i) => `(:p${i}, :e${i}, :d${i}, :v${i})`).join(',')
-    const params = {}
-    good.forEach((row, i) => {
-      params[`p${i}`] = row[0]
-      params[`e${i}`] = row[1]
-      params[`d${i}`] = row[2]
-      params[`v${i}`] = row[3]
-    })
-
-    const [result] = await pool.execute(
-      `INSERT INTO participant_element_value (participant_id, element_definition_id, metric_date, value)
-       VALUES ${valuesSql}
-       ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP`,
-      params
-    )
-    // mysql2 doesn't always split inserted vs updated cleanly; report counts heuristically
-    const affected = result.affectedRows || 0
-    // For ON DUP KEY, each upsert can affect 1 (insert) or 2 (update). We can’t know exact split without extra work.
-    // Return totals + errors; UI can show summary.
-    return res.json({
-      total: rows.length,
-      processed: good.length,
-      affected,
-      errors
-    })
-  } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Bulk import failed', detail: e.message })
-  }
-})
-
-
-//ADD NEW PLAN
 app.post('/api/plans', async (req, res) => {
   const {
     name,
@@ -749,11 +567,12 @@ app.post('/api/plans', async (req, res) => {
   } catch (e) {
     try { await conn.rollback(); } catch {}
     conn.release();
+    console.error(e);
+    logError('CREATE_PLAN_FAIL', e);
     res.status(500).json({ error: 'Failed to create plan', detail: e.message });
   }
 });
 
-// --- API: Participant payout summary (by plan, by period) ---
 app.get('/api/participants/:id/payout-summary', async (req, res) => {
   const participantId = Number(req.params.id)
   const conn = await pool.getConnection()
@@ -845,6 +664,7 @@ app.get('/api/participants/:id/payout-summary', async (req, res) => {
     res.json(result)
   } catch (e) {
     console.error(e)
+    logError('PAYOUT_LOAD_FAIL', e);
     res.status(500).json({ error: 'Failed to load payout summary', detail: e.message })
   } finally {
     conn.release()
@@ -852,7 +672,6 @@ app.get('/api/participants/:id/payout-summary', async (req, res) => {
 })
 
 
-// GET: results for a single run and participant, with period keys
 app.get('/api/runs/:runId/participants/:participantId/results', async (req, res) => {
   const runId = Number(req.params.runId)
   const participantId = Number(req.params.participantId)
@@ -933,12 +752,12 @@ app.get('/api/runs/:runId/participants/:participantId/results', async (req, res)
     res.json(result)
   } catch (e) {
     console.error(e)
+    logError('RUN_DETAIL_FAIL', e);
     res.status(500).json({ error: 'Failed to load run detail', detail: e.message })
   } finally {
     conn.release()
   }
 })
-
 
 app.put('/api/participants/:id', async (req, res) => {
   const id = Number(req.params.id)
@@ -972,8 +791,6 @@ app.put('/api/participants/:id', async (req, res) => {
   res.json({ participant: updated })
 })
 
-
-// DELETE /api/participants/:id
 app.delete('/api/participants/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' })
@@ -997,15 +814,24 @@ app.delete('/api/participants/:id', async (req, res) => {
     await conn.commit(); conn.release()
     res.json({ ok: true, id })
   } catch (e) {
+    console.error(e);
+    logError('PARTICIPANT_DELETE_FAIL', e);
+
     try { await conn.rollback() } catch {}
     conn.release()
     const code = e?.errno || e?.code
     if (code === 1451 || code === 'ER_ROW_IS_REFERENCED_2') {
-      return res.status(409).json({
+
+      let b = {
         error: 'Cannot delete: participant is referenced by other records.',
         detail: e?.sqlMessage || 'Foreign key constraint failed.',
-      })
+      };
+
+      console.error(b);
+
+      return res.status(409).json(b)
     }
+    
     res.status(500).json({ error: 'Delete failed', detail: e?.message })
   }
 })
@@ -1045,9 +871,6 @@ function validateLodashTemplateMaybe(tpl) {
   }
 }
 
-// ---------- COMPUTATIONS CRUD ----------
-
-// List
 app.get('/api/computations', async (_req, res) => {
   try {
     const [rows] = await pool.execute(
@@ -1058,11 +881,12 @@ app.get('/api/computations', async (_req, res) => {
     )
     res.json({ computations: rows })
   } catch (e) {
+    console.error(e);
+    logError('COMPUTATION_LIST_FAIL', e)
     res.status(500).json({ error: 'Failed to list computations', detail: e.message })
   }
 })
 
-// Read one
 app.get('/api/computations/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' })
@@ -1077,6 +901,8 @@ app.get('/api/computations/:id', async (req, res) => {
     if (!row) return res.status(404).json({ error: 'Not found' })
     res.json({ computation: row })
   } catch (e) {
+    console.error(e);
+    logError('COMPUTATION_LOAD_FAIL', e);
     res.status(500).json({ error: 'Failed to load computation', detail: e.message })
   }
 })
@@ -1097,9 +923,6 @@ function extractSourceLabelsFromTemplate(tpl) {
   return [...labels].sort((a, b) => a.localeCompare(b)).join(', ')
 }
 
-
-
-// Create
 app.post('/api/computations', async (req, res) => {
   const { name, scope, template } = req.body || {}
   if (!name || !nameRegex.test(name)) {
@@ -1107,7 +930,10 @@ app.post('/api/computations', async (req, res) => {
   }
   const scopeVal = isValidScope(scope) ? scope : 'payout'
   try { validateLodashTemplateMaybe(template) }
-  catch (e) { return res.status(422).json({ error: 'Invalid lodash template', detail: e.message }) }
+  catch (e) { 
+    logError('INVALID_LODASH_TEMPLATE_FAIL', e)
+    return res.status(422).json({ error: 'Invalid lodash template', detail: e.message }) 
+  }
 
   try {
     // ★ insert first (template may be null)
@@ -1130,12 +956,12 @@ app.post('/api/computations', async (req, res) => {
 
     res.status(201).json({ id: ins.insertId, name, scope: scopeVal, source_data_inputs: inputsCSV })
   } catch (e) {
+    logError('COMPUTATION_ADD_FAIL', e);
     if (e?.errno === 1062) return res.status(409).json({ error: 'Computation name already exists' })
     res.status(500).json({ error: 'Failed to create computation', detail: e.message })
   }
 })
 
-// Update
 app.put('/api/computations/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' })
@@ -1148,7 +974,10 @@ app.put('/api/computations/:id', async (req, res) => {
     return res.status(400).json({ error: 'Invalid scope (use "payout" or "plan")' })
   }
   try { if (template !== undefined) validateLodashTemplateMaybe(template) }
-  catch (e) { return res.status(422).json({ error: 'Invalid lodash template', detail: e.message }) }
+  catch (e) { 
+    logError('INVALID_LODASH_TEMPLATE_FAIL2', e)
+    return res.status(422).json({ error: 'Invalid lodash template', detail: e.message }) 
+  }
 
   const sets = [], params = []
   if (name !== undefined)     { sets.push('name = ?');     params.push(name) }
@@ -1188,12 +1017,12 @@ app.put('/api/computations/:id', async (req, res) => {
 
     res.json({ ok: true, updated: doNoOpUpdate ? 0 : 1, source_data_inputs: inputsCSV })
   } catch (e) {
+    logError('COMPUTATION_PUT_FAIL', e);
     if (e?.errno === 1062) return res.status(409).json({ error: 'Computation name already exists' })
     res.status(500).json({ error: 'Failed to update computation', detail: e.message })
   }
 })
 
-// Delete
 app.delete('/api/computations/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' })
@@ -1202,12 +1031,11 @@ app.delete('/api/computations/:id', async (req, res) => {
     if (r.affectedRows === 0) return res.status(404).json({ error: 'Not found' })
     res.json({ ok: true, removed: r.affectedRows })
   } catch (e) {
+    logError('COMPUTATION_DELETE_FAIL', e);
     res.status(500).json({ error: 'Failed to delete computation', detail: e.message })
   }
 })
 
-
-// Attach a computation to a plan
 app.post('/api/plans/:id/computations', async (req, res) => {
   const planId = Number(req.params.id)
   const { computationId } = req.body || {}
@@ -1221,11 +1049,11 @@ app.post('/api/plans/:id/computations', async (req, res) => {
     )
     res.status(201).json({ ok: true })
   } catch (e) {
+    logError('COMPUTATION_ATTATCH_FAIL', e);
     res.status(500).json({ error: 'Failed to attach computation', detail: e.message })
   }
 })
 
-// Detach a computation from a plan
 app.delete('/api/plans/:id/computations/:compId', async (req, res) => {
   const planId = Number(req.params.id)
   const compId = Number(req.params.compId)
@@ -1239,11 +1067,11 @@ app.delete('/api/plans/:id/computations/:compId', async (req, res) => {
     )
     res.json({ ok: true, removed: r.affectedRows })
   } catch (e) {
+    logError('DETACH_COMPUTATION_FAIL', e)
     res.status(500).json({ error: 'Failed to detach computation', detail: e.message })
   }
 })
 
-// List computations attached to a plan
 app.get('/api/plans/:id/computations', async (req, res) => {
   const planId = Number(req.params.id)
   if (!Number.isFinite(planId)) return res.status(400).json({ error: 'Invalid plan id' })
@@ -1259,6 +1087,7 @@ app.get('/api/plans/:id/computations', async (req, res) => {
     )
     res.json({ computations: rows })
   } catch (e) {
+    logError('COMPUTATION_LOAD_FAIL', e);
     res.status(500).json({ error: 'Failed to load plan computations', detail: e.message })
   }
 })
@@ -1275,7 +1104,6 @@ function toInputDate(value) {
   return tzAdjusted.toISOString().slice(0, 10)
 }
 
-// GET /api/source-data?participantId=&label=&recordScope=&from=&to=&limit=&offset=
 app.get('/api/source-data', async (req, res) => {
   try {
     const where = []
@@ -1323,11 +1151,11 @@ app.get('/api/source-data', async (req, res) => {
 
     res.json({ records: rows, total, limit, offset })
   } catch (e) {
+    logError('SOURCEDATA_LIST_FAIL', e);
     res.status(500).json({ error: 'Failed to list source data', detail: e.message })
   }
 })
 
-// POST /api/source-data  (single add)  -- now supports record_scope
 app.post('/api/source-data', async (req, res) => {
   try {
     const { participantId, label, recordScope, description, date, value } = req.body || {}
@@ -1349,11 +1177,11 @@ app.post('/api/source-data', async (req, res) => {
     )
     res.status(201).json({ id: ins.insertId })
   } catch (e) {
+    logError('SOURCE_DATA_INSERT_FAIL', e);
     res.status(500).json({ error: 'Failed to insert source data', detail: e.message })
   }
 })
 
-// POST /api/source-data/bulk  (CSV textarea) -- now supports an optional "Record Scope" column
 app.post('/api/source-data/bulk', async (req, res) => {
   try {
     const { csv } = req.body || {}
@@ -1450,12 +1278,11 @@ app.post('/api/source-data/bulk', async (req, res) => {
 
     res.json({ inserted: good.length, errors })
   } catch (e) {
+    logError('BULK_INSERT_FAIL', e);
     res.status(500).json({ error: 'Bulk insert failed', detail: e.message })
   }
 })
 
-
-// DELETE /api/source-data/:id
 app.delete('/api/source-data/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' })
@@ -1464,11 +1291,11 @@ app.delete('/api/source-data/:id', async (req, res) => {
     if (r.affectedRows === 0) return res.status(404).json({ error: 'Not found' })
     res.json({ ok: true, removed: r.affectedRows })
   } catch (e) {
+    logError('SOURCE_DATA_DELETE_FAIL', e);
     res.status(500).json({ error: 'Failed to delete record', detail: e.message })
   }
 })
 
-// Bulk delete: DELETE /api/source-data  with body  { ids: [1,2,3] }
 app.delete('/api/source-data', async (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isFinite) : []
   if (!ids.length) return res.status(400).json({ error: 'ids (non-empty array) is required' })
@@ -1484,13 +1311,12 @@ app.delete('/api/source-data', async (req, res) => {
     )
     return res.json({ ok: true, deleted: r.affectedRows })
   } catch (e) {
-    console.error(e)
+    console.error(e);
+    logError('SOURCE_DATA_DELETE_FAIL2', e);
     return res.status(500).json({ error: 'Failed to delete source data', detail: e.message })
   }
 })
 
-
-// ---------- RUN COMPUTATIONS (LODASH-DRIVEN) ----------
 let __lodashTemplate = null
 async function getLodashTemplate() {
   if (typeof __lodashTemplate === 'function') return __lodashTemplate
@@ -1498,9 +1324,6 @@ async function getLodashTemplate() {
   try { const m = await import('lodash');    const fn = m?.template ?? m?.default?.template; if (typeof fn === 'function') return (__lodashTemplate = fn) } catch {}
   return null
 }
-
-// Put this near the top of your server file:
-//const FORBIDDEN = /\b(globalThis|global|process|require|module|exports|Function|eval|constructor|__proto__|child_process|fs|import)\b/
 
 app.post('/api/plans/:id/run-computations', async (req, res) => {
   const planId = Number(req.params.id)
@@ -1829,13 +1652,11 @@ app.post('/api/plans/:id/run-computations', async (req, res) => {
     try { await conn.rollback() } catch {}
     conn.release()
     console.error(e)
+    logError('RUN_COMPUTATION_FAIL', e);
     res.status(500).json({ error: 'Run computations failed', detail: e.message })
   }
 })
 
-
-
-// Payout history for a participant, grouped by plan & period
 app.get('/api/participants/:id/payout-history', async (req, res) => {
   const participantId = Number(req.params.id)
   if (!Number.isFinite(participantId)) return res.status(400).json({ error: 'Invalid participant id' })
@@ -1931,14 +1752,11 @@ app.get('/api/participants/:id/payout-history', async (req, res) => {
 
     res.json({ participantId, plans: Array.from(plansMap.values()) })
   } catch (e) {
+    logError('PAYOUT_HISTORY_LOAD_FAIL', e);
     res.status(500).json({ error: 'Failed to load payout history', detail: e.message })
   }
 })
 
-
-
-// POST /api/participants/:id/comp-statement
-// --- shared helpers (same semantics as your PDF route) ---------------------
 const isYMD = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test((s || '').slice(0,10))
 const toYMD = (v) => {
   if (!v) return ''
@@ -2172,18 +1990,25 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
     }
 
     if (!templateString.trim()) {
-      return res.status(500).json({
+
+      let e = {
         error: "Comp plan template not configured",
         detail: "Add a row in settings with setting_name='comp_plan_template_ejs'."
-      })
+      };
+      console.log(e);
+      logError('STMT_GEN_FAIL', e);
+      return res.status(500).json(e)
     }
 
     const m = String(templateString).match(FORBIDDEN)
     if (m) {
-      return res.status(400).json({
+      let e = {
         error: 'Template blocked by security policy',
         detail: `Forbidden keyword detected: ${m[0]}`
-      })
+      };
+      console.log(e);
+
+      return res.status(400).json(e)
     }
 
     // Render AFTER the safety check; expose chosen scopes in the template context
@@ -2211,14 +2036,13 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
     return res.status(200).send(html)
 
   } catch (e) {
-    console.error(e)
+    console.error("e", e);
+    logError('RENDER_STATEMENT_FAIL', e);
     if (!res.headersSent) res.status(500).json({ error: 'Failed to render statement', detail: e.message })
   } finally {
     try { conn.release() } catch {}
   }
 })
-
-
 
 app.get('/api/plans/:id/payout-run-summary', async (req, res) => {
   const planId = Number(req.params.id)
@@ -2246,12 +2070,11 @@ app.get('/api/plans/:id/payout-run-summary', async (req, res) => {
     res.json({ planId, participants: rows })
   } catch (e) {
     console.error(e)
+    logError('PAYOUT_SUMMARY_LOAD_FAIL', e);
     res.status(500).json({ error: 'Failed to load payout summary', detail: e.message })
   }
 })
 
-
-// GET /api/dashboard
 app.get('/api/dashboard', async (req, res) => {
   const conn = await pool.getConnection()
   try {
@@ -2342,14 +2165,13 @@ app.get('/api/dashboard', async (req, res) => {
     })
   } catch (e) {
     console.error(e)
+    logError('DASHBOARD_BUILD_FAIL', e);
     res.status(500).json({ error: 'Failed to build dashboard', detail: e.message })
   } finally {
     try { conn.release() } catch {}
   }
 })
 
-
-// ---------- Admin: Backup ----------
 app.get('/api/admin/backup', async (req, res) => {
   const DB_HOST = process.env.DB_HOST
   const DB_PORT = Number(process.env.DB_PORT)
@@ -2411,19 +2233,10 @@ app.get('/api/admin/backup', async (req, res) => {
     res.status(200).end(sql, 'utf8')
   } catch (e) {
     console.error(e)
+    logError('BACKUP_FAIL', e);
     res.status(500).json({ error: 'Backup failed', detail: e.message })
   }
 })
-
-
-
-
-// ---------- Admin: Restore ----------
-// ---- helper: boundary-safe streaming replacer --------------------------------
-import { Transform } from 'node:stream'
-import { StringDecoder } from 'node:string_decoder'
-import { pipeline as pipe } from 'node:stream/promises'
-
 
 async function ensureUniqueIndexOnSettings(pool) {
   const [rows] = await pool.execute('SHOW INDEX FROM `settings`')
@@ -2476,8 +2289,6 @@ function createInsertToReplaceSettingsStream() {
   })
 }
 
-// Uses your Multer middleware: upload.single('dump')
-// Assumes app, pool, upload are defined earlier
 app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
   const confirm = req.body?.confirm
   if (confirm !== 'ERASE') return res.status(400).json({ error: 'Confirmation required: type ERASE' })
@@ -2581,6 +2392,7 @@ app.post('/api/admin/restore', upload.single('dump'), async (req, res) => {
     console.error(e)
     // Best-effort cleanup if something failed before we opened the stream
     try { await fsp.rm(dumpPath, { force: true }) } catch {}
+    logError('RESTORE_FAIL', e);
     res.status(500).json({ error: 'Restore failed', detail: e.message })
   }
 })
@@ -2667,13 +2479,11 @@ app.post('/api/admin/factory-reset', async (req, res) => {
     res.json({ ok: true })
   } catch (e) {
     console.error(e)
+    logError('FACTORY_RESET_FAIL', e);
     res.status(500).json({ error: 'Factory reset failed', detail: e.message })
   }
 })
 
-
-
-// READ template by setting_name
 app.get('/api/settings/:name', async (req, res) => {
   const name = String(req.params.name || '').trim()
   if (!name) return res.status(400).json({ error: 'Missing setting name' })
@@ -2700,7 +2510,6 @@ app.get('/api/settings/:name', async (req, res) => {
   }
 })
 
-// UPSERT (create-or-update) by setting_name
 app.put('/api/settings/:name', async (req, res) => {
   const name = String(req.params.name || '').trim()
   if (!name) return res.status(400).json({ error: 'Missing setting name' })
@@ -2746,12 +2555,12 @@ app.put('/api/settings/:name', async (req, res) => {
     }
   } catch (e) {
     console.error(e)
+    logError('SAVE_SETTING_FAIL', e);
     return res.status(500).json({ error: 'Failed to save setting', detail: e.message })
   }
 })
 
-//CSV Exporter
-// GET /api/payout-history  -> returns rows ready for CSV; now includes `record_scopes`
+
 app.get('/api/payout-history', async (req, res) => {
   try {
     // Parse filters (same as before)
@@ -2867,14 +2676,11 @@ app.get('/api/payout-history', async (req, res) => {
     res.json(out)
   } catch (e) {
     console.error('GET /api/payout-history failed:', e)
+    logError('PAYOUT_FETCH_FAIL', e);
     res.status(500).json({ error: 'Failed to fetch payout history', detail: e.message })
   }
 })
 
-
-
-// GET /api/participants/:id/required-source-inputs
-// Returns: { participantId, allInputs: string[], plans: [{ planId, planName, planVersion, inputs: string[], computations: [{id,name,inputs:string[]}] }] }
 app.get('/api/participants/:id/required-source-inputs', async (req, res) => {
   const participantId = Number(req.params.id)
   if (!Number.isFinite(participantId)) {
@@ -2964,11 +2770,10 @@ app.get('/api/participants/:id/required-source-inputs', async (req, res) => {
     })
   } catch (e) {
     console.error(e)
+    logError('SOURCE_INPUT_LOAD_FAIL', e);
     res.status(500).json({ error: 'Failed to load required source inputs', detail: e.message })
   }
 })
-
-
 
 app.patch('/api/plans/:id/active', async (req, res) => {
   const id = Number(req.params.id)
@@ -2987,11 +2792,11 @@ app.patch('/api/plans/:id/active', async (req, res) => {
     res.json({ ok: true, id, isActive })
   } catch (e) {
     console.error(e)
+    logError('IS_ACTIVE_UPDATE_FAIL', e);
     res.status(500).json({ error: 'Failed to update is_active' })
   }
 })
 
-// Optional convenience endpoints:
 app.post('/api/plans/:id/archive', async (req, res) => {
   req.body = { isActive: 0 }
   return app._router.handle(req, res, () => {}, 'patch', `/api/plans/${req.params.id}/active`)
@@ -3001,3 +2806,224 @@ app.post('/api/plans/:id/unarchive', async (req, res) => {
   req.body = { isActive: 1 }
   return app._router.handle(req, res, () => {}, 'patch', `/api/plans/${req.params.id}/active`)
 })
+
+async function logError(errorCode, errorObj) {
+  try {
+    const errorRef = String(errorCode);
+    const errorMessage =
+      errorObj instanceof Error
+        ? errorObj.stack || errorObj.message
+        : typeof errorObj === "object"
+        ? JSON.stringify(errorObj, null, 2)
+        : String(errorObj);
+
+    await pool.execute(
+      `INSERT INTO error_logs (error_reference, error_message, time_triggered) VALUES (?, ?, now())`,
+      [errorRef, errorMessage]
+    );
+  } catch (dbErr) {
+    console.error("Error logging to database:", dbErr);
+  }
+}
+
+app.get('/api/error-logs', async (req, res) => {
+  const limitRaw = parseInt(req.query.limit, 10)
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 100) : 10
+
+  try {
+    const [rows] = await pool.execute(
+      'SELECT id, error_reference, error_message, time_triggered FROM error_logs ORDER BY id DESC LIMIT ?',
+      [limit]
+    )
+    res.json({ data: rows })
+  } catch (err) {
+    // optional: reuse your logError helper if present
+    if (typeof logError === 'function') {
+      try { await logError('ERR_LOGS_FETCH_FAIL', err) } catch (_e) {}
+    }
+    res.status(500).json({ error: 'Failed to fetch error logs' })
+  }
+})
+
+
+/*
+// LIST metrics (optional filters)
+app.get('/api/metrics', async (req, res) => {
+  try {
+    const { participantId, elementDefinitionId, from, to } = req.query
+    const where = []
+    const params = {}
+    if (participantId) { where.push('pev.participant_id = :participantId'); params.participantId = Number(participantId) }
+    if (elementDefinitionId) { where.push('pev.element_definition_id = :elementDefinitionId'); params.elementDefinitionId = Number(elementDefinitionId) }
+    if (from) { where.push('pev.metric_date >= :from'); params.from = from }
+    if (to) { where.push('pev.metric_date <= :to'); params.to = to }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+    const [rows] = await pool.execute(
+      `SELECT
+         pev.id, pev.metric_date AS metricDate, pev.value,
+         p.id AS participantId, p.first_name AS firstName, p.last_name AS lastName,
+         ed.id AS elementDefinitionId, ed.name AS elementName, ed.element_type AS elementType, ed.unit
+       FROM participant_element_value pev
+       JOIN plan_participant p ON p.id = pev.participant_id
+       JOIN element_definition ed ON ed.id = pev.element_definition_id
+       ${whereSql}
+       ORDER BY pev.metric_date DESC, pev.id DESC`,
+      params
+    )
+    res.json(rows)
+  } catch (e) {
+    console.error(e)
+    logError('METRICS_FETCH_FAIL', e);
+    res.status(500).json({ error: 'Failed to fetch metrics' })
+  }
+})
+
+// CREATE a metric (insert or upsert by unique key)
+app.post('/api/metrics', async (req, res) => {
+  try {
+    const { participantId, elementDefinitionId, metricDate, value } = req.body
+    await pool.execute(
+      `INSERT INTO participant_element_value
+         (participant_id, element_definition_id, metric_date, value)
+       VALUES (:participantId, :elementDefinitionId, :metricDate, :value)
+       ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP`,
+      { participantId, elementDefinitionId, metricDate, value }
+    )
+    res.status(201).json({ ok: true })
+  } catch (e) {
+    console.error(e)
+    res.status(400).json({ error: 'Failed to save metric', detail: e.message })
+  }
+})
+
+// DELETE a metric row
+app.delete('/api/metrics/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    await pool.execute('DELETE FROM participant_element_value WHERE id = :id', { id })
+    res.status(204).end()
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Failed to delete metric', detail: e.message })
+  }
+})
+
+
+// BULK UPSERT metrics from CSV text
+app.post('/api/metrics/bulk', async (req, res) => {
+  try {
+    const { csv, hasHeader = false } = req.body
+    if (!csv || typeof csv !== 'string') {
+      return res.status(400).json({ error: 'Missing csv string in body' })
+    }
+
+    // Very simple CSV parsing (no quotes/escapes). One row per line, comma-delimited.
+    const lines = csv
+      .split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(l => l.length > 0)
+
+    let start = 0
+    if (hasHeader) start = 1 // skip the first line
+
+    // Collect unique participant ids and element names for lookups
+    const rows = []
+    const participantIds = new Set()
+    const elementNames = new Set()
+
+    for (let i = start; i < lines.length; i++) {
+      const raw = lines[i]
+      const parts = raw.split(',').map(s => s.trim())
+      if (parts.length < 4) {
+        rows.push({ line: i + 1, raw, status: 'error', message: 'Expected 4 columns' })
+        continue
+      }
+      const [participantIdStr, elementName, metricDate, valueStr] = parts
+      const participantId = Number(participantIdStr)
+      const value = Number(valueStr)
+
+      rows.push({ line: i + 1, raw, participantId, elementName, metricDate, value, status: 'pending' })
+      if (!Number.isNaN(participantId)) participantIds.add(participantId)
+      if (elementName) elementNames.add(elementName)
+    }
+
+    if (rows.length === 0) return res.json({ total: 0, inserted: 0, updated: 0, errors: [] })
+
+    // Lookup participants that exist
+    const [participants] = await pool.execute(
+      `SELECT id FROM plan_participant WHERE id IN (${[...participantIds].map((_,i)=>`:p${i}`).join(',')})`,
+      Object.fromEntries([...participantIds].map((v,i)=>[`p${i}`, v]))
+    )
+    const participantSet = new Set(participants.map(p => p.id))
+
+    // Lookup element definitions by NAME (element code)
+    const nameParams = Object.fromEntries([...elementNames].map((v,i)=>[`n${i}`, v]))
+    const [elements] = await pool.execute(
+      `SELECT id, name FROM element_definition WHERE name IN (${[...elementNames].map((_,i)=>`:n${i}`).join(',')})`,
+      nameParams
+    )
+    const elementByName = new Map(elements.map(e => [e.name, e.id]))
+
+    // Prepare values to insert
+    const good = []
+    const errors = []
+    for (const r of rows) {
+      if (r.status === 'error') { errors.push(r); continue }
+      if (!participantSet.has(r.participantId)) {
+        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Unknown participant_id ${r.participantId}` })
+        continue
+      }
+      const edId = elementByName.get(r.elementName)
+      if (!edId) {
+        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Unknown element name '${r.elementName}'` })
+        continue
+      }
+      if (!r.metricDate || !/^\d{4}-\d{2}-\d{2}$/.test(r.metricDate)) {
+        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Bad date '${r.metricDate}', expected YYYY-MM-DD` })
+        continue
+      }
+      if (Number.isNaN(r.value)) {
+        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Bad number value '${r.value}'` })
+        continue
+      }
+      good.push([r.participantId, edId, r.metricDate, r.value])
+    }
+
+    if (good.length === 0) {
+      return res.status(400).json({ total: rows.length, inserted: 0, updated: 0, errors })
+    }
+
+    // Batch insert with upsert
+    // unique key is (participant_id, element_definition_id, metric_date)
+    const valuesSql = good.map((_, i) => `(:p${i}, :e${i}, :d${i}, :v${i})`).join(',')
+    const params = {}
+    good.forEach((row, i) => {
+      params[`p${i}`] = row[0]
+      params[`e${i}`] = row[1]
+      params[`d${i}`] = row[2]
+      params[`v${i}`] = row[3]
+    })
+
+    const [result] = await pool.execute(
+      `INSERT INTO participant_element_value (participant_id, element_definition_id, metric_date, value)
+       VALUES ${valuesSql}
+       ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP`,
+      params
+    )
+    // mysql2 doesn't always split inserted vs updated cleanly; report counts heuristically
+    const affected = result.affectedRows || 0
+    // For ON DUP KEY, each upsert can affect 1 (insert) or 2 (update). We can’t know exact split without extra work.
+    // Return totals + errors; UI can show summary.
+    return res.json({
+      total: rows.length,
+      processed: good.length,
+      affected,
+      errors
+    })
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: 'Bulk import failed', detail: e.message })
+  }
+})
+*/

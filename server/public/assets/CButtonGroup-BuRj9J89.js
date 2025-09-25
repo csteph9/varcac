@@ -1,1 +1,0 @@
-import{y as r,z as n}from"./index-CQNOpYTI.js";const a=r({name:"CButtonGroup",props:{size:{type:String,validator:t=>["sm","lg"].includes(t)},vertical:Boolean},setup(t,{slots:e}){return()=>n("div",{class:[t.vertical?"btn-group-vertical":"btn-group",{[`btn-group-${t.size}`]:t.size}]},e.default&&e.default())}});export{a as C};
