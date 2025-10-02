@@ -15,12 +15,14 @@
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
---
--- Table structure for table `comp_plan`
---
 CREATE DATABASE IF NOT EXISTS varcac
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE varcac;
+
+
+--
+-- Table structure for table `comp_plan`
+--
 
 DROP TABLE IF EXISTS `comp_plan`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -185,26 +187,6 @@ CREATE TABLE `error_logs` (
   `time_triggered` datetime DEFAULT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=0 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-/*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `formula_library`
---
-
-DROP TABLE IF EXISTS `formula_library`;
-/*!40101 SET @saved_cs_client     = @@character_set_client */;
-/*!40101 SET character_set_client = utf8 */;
-CREATE TABLE `formula_library` (
-  `id` bigint(20) NOT NULL AUTO_INCREMENT,
-  `name` varchar(120) NOT NULL,
-  `expression` text NOT NULL,
-  `description` text DEFAULT NULL,
-  `variables_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`variables_json`)),
-  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
-  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `name` (`name`)
-) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -657,13 +639,8 @@ CREATE TABLE `settings` (
   `setting_value` longtext DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_settings_setting_name` (`setting_name`)
-) ENGINE=InnoDB AUTO_INCREMENT=0 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+) ENGINE=InnoDB 0 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
-INSERT INTO `settings` VALUES
-(1,'comp_plan_template_ejs','<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <title>Compensation Statement ΓÇö <%= participant?.firstName %> <%= participant?.lastName %></title>\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n  <style>\n    :root {\n      --text:#111; --muted:#666; --hr:#e5e5e5; --table-border:#e5e5e5; --thead-bg:#f5f5f5; --code-bg:#f8f9fa;\n    }\n    * { box-sizing: border-box; }\n    body { margin:16px; font:13px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,\"Apple Color Emoji\",\"Segoe UI Emoji\"; color:var(--text); }\n    h1,h2,h3 { margin:0 0 6px 0; }\n    h1 { font-size:20px; } h2 { font-size:16px; margin-top:16px; } h3 { font-size:14px; margin-top:12px; }\n    .muted { color:var(--muted); } .tiny{ font-size:12px; }\n    .hr { border:0; height:1px; background:var(--hr); margin:12px 0; }\n    .section { margin-bottom:14px; }\n    .right { text-align:right; }\n\n    table { width:100%; border-collapse:collapse; margin:6px 0 10px 0; }\n    thead th { background:var(--thead-bg); text-align:left; border:1px solid var(--table-border); padding:5px 6px; }\n    tbody td { border:1px solid var(--table-border); padding:5px 6px; vertical-align:top; }\n    td.num, th.num { text-align:right; }\n    .pill { display:inline-block; padding:1px 6px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:11px; margin-left:6px; }\n\n    .appendix-block { background:var(--code-bg); padding:8px 9px; border-radius:6px; overflow:auto; white-space:pre; }\n  </style>\n</head>\n<body>\n\n  <!-- Header / Participant -->\n  <header class=\"section\">\n    <h1>VarCAC</h1>\n    <div class=\"tiny muted\">Compensation Statement ΓÇó Generated <%= generatedAt %></div>\n    <div><strong><%= participant?.firstName %> <%= participant?.lastName %></strong> (ID: <%= participant?.id %>)</div>\n    <% if (participant?.email) { %><div class=\"tiny\"><%= participant.email %></div><% } %>\n  </header>\n\n  <!-- ===== Summary: one table (plan ├ù date) ===== -->\n  <%\n    \n    const _summary = [];\n    for (const plan of plans) {\n      const groups = groupsByPlanId[plan.id] || [];\n      for (const g of groups) {\n        const dateKey = g.due || g.end || g.start;\n        _summary.push({\n          plan: plan.name + (plan.version ? ` v${plan.version}` : \'\'),\n          period: g.label || `${g.start} ΓåÆ ${g.end}`,\n          date: dateKey,\n          total: Number(g.total || 0),\n        });\n      }\n    }\n    _summary.sort((a,b)=> new Date(a.date) - new Date(b.date) || a.plan.localeCompare(b.plan));\n    const _grand = _summary.reduce((s,r)=> s + (r.total||0), 0);\n  %>\n\n  <section class=\"section\">\n    <h2>Summary</h2>\n    <table>\n      <thead>\n        <tr>\n          <th style=\"width:18%\">Date</th>\n          <th style=\"width:32%\">Plan</th>\n          <th>Period</th>\n          <th class=\"num\" style=\"width:18%\">Payable</th>\n        </tr>\n      </thead>\n      <tbody>\n        <% if (!_summary.length) { %>\n          <tr><td colspan=\"4\" class=\"muted tiny\">No payouts available.</td></tr>\n        <% } %>\n        <% for (const r of _summary) { %>\n          <tr>\n            <td><%= toYMD(r.date) %></td>\n            <td><%= r.plan %></td>\n            <td><%= r.period %></td>\n            <td class=\"num\"><%= fmtMoney(r.total) %></td>\n          </tr>\n        <% } %>\n        <% if (_summary.length) { %>\n          <tr>\n            <td></td><td></td>\n            <td class=\"right\"><strong>Grand Total</strong></td>\n            <td class=\"num\"><strong><%= fmtMoney(_grand) %></strong></td>\n          </tr>\n        <% } %>\n      </tbody>\n    </table>\n  </section>\n\n  <!-- ===== Detailed breakdown (condensed) ===== -->\n  <% for (const plan of plans){ %>\n    <section class=\"section\">\n      <h2><%= plan.name %><% if (plan.version) { %> <span class=\"tiny muted\">v<%= plan.version %></span><% } %></h2>\n      <div class=\"tiny muted\">Window: <%= toYMD(plan.effectiveStart) %> ΓåÆ <%= toYMD(plan.effectiveEnd) %></div>\n\n      <%\n        const groups = (groupsByPlanId[plan.id] || []).slice().sort((a,b)=> new Date(a.due) - new Date(b.due));\n        let planTotal = 0;\n      %>\n\n      <% if (!groups.length) { %>\n        <div class=\"tiny muted\">(No payouts found for this plan)</div>\n      <% } %>\n\n      <% for (const g of groups) { %>\n        <h3>\n          <%= g.label %>\n          <% if (g.due) { %><span class=\"pill tiny\">Due: <%= toYMD(g.due) %></span><% } %>\n          <span class=\"tiny muted\"> ΓÇó <%= g.start %> ΓåÆ <%= g.end %></span>\n        </h3>\n\n        <!-- Payout lines (condensed) -->\n        <table>\n          <thead>\n            <tr>\n              <th>Computation</th>\n              <th class=\"num\">Amount</th>\n              <th>Created</th>\n            </tr>\n          </thead>\n          <tbody>\n            <% for (const ln of (g.items || [])) { %>\n              <tr>\n                <td><%= ln.outputLabel || \'ΓÇö\' %></td>\n                <td class=\"num\"><%= fmtMoney(ln.amount) %></td>\n                <td class=\"tiny\"><%= new Date(ln.createdAt).toLocaleString() %></td>\n              </tr>\n            <% } %>\n            <tr>\n              <td class=\"right\"><strong>Total</strong></td>\n              <td class=\"num\"><strong><%= fmtMoney(g.total) %></strong></td>\n              <td></td>\n            </tr>\n          </tbody>\n        </table>\n        <% planTotal += (g.total || 0); %>\n\n        <!-- Source data (only render if present to save space) -->\n        <% const srcRows = (sourceDataByWindow[g.key] || []); %>\n        <% if (srcRows.length) { %>\n          <table>\n            <thead>\n              <tr>\n                <th style=\"width:16%\">Date</th>\n                <th style=\"width:28%\">Data Source</th>\n                <th class=\"num\" style=\"width:14%\">Value</th>\n                <th style=\"width:18%\">Origin</th>\n                <th>Description</th>\n              </tr>\n            </thead>\n            <tbody>\n              <% for (const s of srcRows) { %>\n                <tr>\n                  <td><%= toYMD(s.date) %></td>\n                  <td><%= s.label || \'ΓÇö\' %></td>\n                  <td class=\"num\"><%= fmtMoney(s.value) %></td>\n                  <td class=\"tiny\"><%= s.origin %></td>\n                  <td class=\"tiny\"><%= s.description || \'\' %></td>\n                </tr>\n              <% } %>\n            </tbody>\n          </table>\n        <% } %>\n\n        <hr class=\"hr\" />\n      <% } %>\n\n      <div class=\"right\"><strong>Plan Total: <%= fmtMoney(planTotal) %></strong></div>\n    </section>\n  <% } %>\n\n  <% if (appendix.length) { %>\n    <section class=\"section\">\n      <h2>Appendix: Computation Formulas</h2>\n      <%\n        const byPlan = {};\n        for (const c of appendix) { (byPlan[c.planId] ||= []).push(c); }\n      %>\n      <% for (const p of plans) {\n           const items = byPlan[p.id] || [];\n           if (!items.length) continue;\n      %>\n        <h3><%= p.name %><% if (p.version) { %> <span class=\"tiny muted\">v<%= p.version %></span><% } %></h3>\n        <% for (const c of items) { %>\n          <div style=\"margin:6px 0;\">\n            <div><strong><%= c.name %></strong> ΓÇö <span class=\"tiny muted\"><%= c.scope %></span></div>\n            <div class=\"appendix-block\"><%= c.template && c.template.length ? c.template : \'// (empty template)\' %></div>\n          </div>\n          <hr class=\"hr\" />\n        <% } %>\n      <% } %>\n    </section>\n  <% } %>\n\n</body>\n</html>\n');
-
-
 
 --
 -- Table structure for table `source_data`
@@ -735,6 +712,28 @@ DELIMITER ;
 /*!50003 SET collation_connection  = @saved_col_connection */ ;
 
 --
+-- Table structure for table `statements_outbox`
+--
+
+DROP TABLE IF EXISTS `statements_outbox`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8 */;
+CREATE TABLE `statements_outbox` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `participant_id` bigint(20) NOT NULL,
+  `plan_ids_csv` text DEFAULT NULL,
+  `record_scopes_csv` text NOT NULL,
+  `payload_b64` longtext NOT NULL,
+  `status` enum('PENDING','SENT','FAILED') NOT NULL DEFAULT 'PENDING',
+  `last_updated` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  `plan_ids_hash` char(64) GENERATED ALWAYS AS (sha2(coalesce(`plan_ids_csv`,''),256)) STORED,
+  `record_scopes_hash` char(64) GENERATED ALWAYS AS (sha2(coalesce(`record_scopes_csv`,''),256)) STORED,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `ux_participant_plan_scope` (`participant_id`,`plan_ids_hash`,`record_scopes_hash`)
+) ENGINE=InnoDB AUTO_INCREMENT=0 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
 -- Dumping events for database 'varcac'
 --
 
@@ -771,7 +770,6 @@ DELIMITER ;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
-
 
 DELIMITER $$
 CREATE PROCEDURE bump_last_mod()
@@ -871,4 +869,4 @@ CREATE TRIGGER `trg_source_data_ad` AFTER DELETE ON `source_data`
 FOR EACH ROW CALL bump_last_mod()//
 
 DELIMITER ;
--- Dump completed on 2025-09-25  0:23:32
+-- Dump completed on 2025-10-01 17:46:35

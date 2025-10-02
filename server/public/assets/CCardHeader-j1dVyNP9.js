@@ -1,0 +1,1 @@
+import{y as r,z as d}from"./index-CFGD_Gi7.js";const s=r({name:"CCardHeader",props:{as:{type:String,default:"div"}},setup(a,{slots:e}){return()=>d(a.as,{class:"card-header"},e.default&&e.default())}});export{s as C};

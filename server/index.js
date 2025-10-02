@@ -24,6 +24,7 @@ import { rateLimit, ipKeyGenerator } from 'express-rate-limit'
 import { Transform } from 'node:stream'
 import { StringDecoder } from 'node:string_decoder'
 import { pipeline as pipe } from 'node:stream/promises'
+import axios from 'axios'
 
 const baseKey = (req) => (req.user?.id ? `u:${req.user.id}` : ipKeyGenerator(req))
 
@@ -1796,6 +1797,7 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
   const planIds = Array.isArray(req.body?.planIds)
     ? req.body.planIds.map(Number).filter(Number.isFinite)
     : []
+  console.log("body-->", req.body, "params-->", req.params);
 
   // ★ NEW: normalize recordScopes
   const recordScopesRaw = Array.isArray(req.body?.recordScopes) ? req.body.recordScopes : []
@@ -1847,11 +1849,11 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
 
     // --- Plans (headers)
     const [plans] = await conn.execute(
-      `SELECT id, name, version, effective_start AS effectiveStart, effective_end AS effectiveEnd
+      `SELECT id, name, version, effective_start AS effectiveStart, effective_end AS effectiveEnd, description as description
          FROM comp_plan WHERE id IN (${validPlanIds.map(() => '?').join(',')})`,
       validPlanIds
     )
-    const planById = Object.fromEntries(plans.map(p => [p.id, p]))
+    //const planById = Object.fromEntries(plans.map(p => [p.id, p]))
 
     // --- Payouts (all labels/periods)
     const [payouts] = await conn.execute(
@@ -2030,8 +2032,8 @@ app.post('/api/participants/:id/comp-statement', async (req, res) => {
 
     res.setHeader('Content-Type', 'text/html; charset=utf-8')
 
-    const base64Encoded = Buffer.from(html, "utf-8").toString("base64");
-    console.log(base64Encoded);
+    //const base64Encoded = Buffer.from(html, "utf-8").toString("base64");
+    //console.log(base64Encoded);
 
     return res.status(200).send(html)
 
@@ -2512,6 +2514,7 @@ app.get('/api/settings/:name', async (req, res) => {
 
 app.put('/api/settings/:name', async (req, res) => {
   const name = String(req.params.name || '').trim()
+
   if (!name) return res.status(400).json({ error: 'Missing setting name' })
 
   // Accept strings only; coerce others (null/undefined become empty string)
@@ -2846,184 +2849,278 @@ app.get('/api/error-logs', async (req, res) => {
 })
 
 
-/*
-// LIST metrics (optional filters)
-app.get('/api/metrics', async (req, res) => {
-  try {
-    const { participantId, elementDefinitionId, from, to } = req.query
-    const where = []
-    const params = {}
-    if (participantId) { where.push('pev.participant_id = :participantId'); params.participantId = Number(participantId) }
-    if (elementDefinitionId) { where.push('pev.element_definition_id = :elementDefinitionId'); params.elementDefinitionId = Number(elementDefinitionId) }
-    if (from) { where.push('pev.metric_date >= :from'); params.from = from }
-    if (to) { where.push('pev.metric_date <= :to'); params.to = to }
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
-    const [rows] = await pool.execute(
-      `SELECT
-         pev.id, pev.metric_date AS metricDate, pev.value,
-         p.id AS participantId, p.first_name AS firstName, p.last_name AS lastName,
-         ed.id AS elementDefinitionId, ed.name AS elementName, ed.element_type AS elementType, ed.unit
-       FROM participant_element_value pev
-       JOIN plan_participant p ON p.id = pev.participant_id
-       JOIN element_definition ed ON ed.id = pev.element_definition_id
-       ${whereSql}
-       ORDER BY pev.metric_date DESC, pev.id DESC`,
-      params
+const SELF_BASE = process.env.DB_HOST + ":3001"
+const HUB_BASE  = process.env.STATEMENTHUB_API_BASE || 'https://statementhub.varcac.com'
+//const HUB_KEY   = process.env.STATEMENTHUB_API_KEY || ''
+
+async function enqueueOneStatement(participantId, body) {
+  // call your existing endpoint
+  const url = `http://${SELF_BASE}/api/participants/${participantId}/comp-statement`
+  console.log("url-->", url);
+  // if your endpoint expects different query params, tweak here:
+  const resp = await axios.post(url, body)
+  //console.log(resp);
+  const rbody = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data)
+  const b64 = Buffer.from(rbody, 'utf8').toString('base64')
+  
+  // CSV of plan IDs
+  const planCsv = body.planIds.join(',');
+  const scopeCsv = body.recordScopes.join(',');
+
+  // Upsert one row per participant (requires UNIQUE KEY on participant_id)
+await pool.execute(
+    `INSERT INTO statements_outbox
+       (participant_id, plan_ids_csv, record_scopes_csv, payload_b64, status)
+     VALUES (?, ?, ?, ?, 'PENDING')
+     ON DUPLICATE KEY UPDATE
+       plan_ids_csv       = VALUES(plan_ids_csv),
+       record_scopes_csv  = VALUES(record_scopes_csv),
+       payload_b64        = VALUES(payload_b64),
+       status             = 'PENDING',
+       last_updated       = CURRENT_TIMESTAMP`,
+    [participantId, planCsv, scopeCsv, b64]
+  )
+
+  return 1
+}
+
+async function getAttachedPlanIds(pool, participantId) {
+  const [rows] = await pool.query(
+    `SELECT plan_id
+       FROM participant_plan
+      WHERE participant_id = ?`,
+    [participantId]
+  )
+  return rows.map(r => Number(r.plan_id)).filter(Number.isFinite)
+}
+
+/**
+ * POST /api/statement-hub/calc-enqueue
+ * Body: { participantIds: number[], planIds: number[], periodStart: 'YYYY-MM-DD', periodEnd: 'YYYY-MM-DD' }
+ * For each combination of participant x plan, call comp-statement endpoint and store base64 in outbox.
+ */
+app.post('/api/statement-hub/calc-enqueue', async (req, res) => {
+  const { participantIds, planIds, scope } = req.body || {}
+
+  console.log(req.body);
+  if (!Array.isArray(participantIds) || !participantIds.length ||
+      !Array.isArray(planIds)        || !planIds.length ) {
+    return res.status(400).json({ error: 'participantIds, planIds, periodStart, periodEnd are required' })
+  }
+
+
+  try {
+    const uniqPids = Array.from(new Set(participantIds)).filter(Number.isFinite)
+
+    // sanitize incoming planIds filter (optional)
+    const requestedPlanIdSet = Array.isArray(planIds) && planIds.length
+      ? new Set(planIds.map(n => Number(n)).filter(Number.isFinite))
+      : null
+
+    // sanitize incoming recordScopes -> array of strings (default ['ACTUAL'])
+    const recordScopes = Array.isArray(scope) ? scope
+                      : Array.isArray(recordScopes) ? recordScopes
+                      : Array.isArray(req.body.recordScopes) ? req.body.recordScopes
+                      : [String(req.body.scope || 'ACTUAL')]
+    const cleanScopes = Array.from(
+      new Set(recordScopes.map(s => String(s || '').trim()).filter(Boolean))
     )
-    res.json(rows)
+    const bodyScopes = cleanScopes.length ? cleanScopes : ['ACTUAL']
+
+    let enqueued = 0
+
+    for (const pid of uniqPids) {
+      // only the plans actually attached to this participant
+      const attached = await getAttachedPlanIds(pool, pid)
+
+      // if the caller provided planIds, intersect; otherwise use all attached
+      const planIdsForPid = requestedPlanIdSet
+        ? attached.filter(id => requestedPlanIdSet.has(id))
+        : attached
+
+      if (!planIdsForPid.length) continue
+
+      try {
+        // single call per participant with the required body shape
+        enqueued += await enqueueOneStatement(pid, {
+          planIds: planIdsForPid,
+          recordScopes: bodyScopes
+        })
+      } catch (e) {
+          await logError('STMT_ENQUEUE_FAIL_PARTICIPANT', e)
+      }
+    }
+
+    res.json({ enqueued })
   } catch (e) {
-    console.error(e)
-    logError('METRICS_FETCH_FAIL', e);
-    res.status(500).json({ error: 'Failed to fetch metrics' })
+    await logError('STMT_ENQUEUE_BULK_FAIL', e)
+    res.status(500).json({ error: 'enqueue failed' })
   }
 })
 
-// CREATE a metric (insert or upsert by unique key)
-app.post('/api/metrics', async (req, res) => {
+
+app.get('/api/statement-hub/outbox', async (req, res) => {
+  const { status } = req.query
+  const where = status ? 'WHERE status = ?' : ''
+  const params = status ? [status] : []
   try {
-    const { participantId, elementDefinitionId, metricDate, value } = req.body
+    const [rows] = await pool.query(
+      `SELECT id, participant_id, plan_ids_csv, record_scopes_csv, last_updated
+       FROM statements_outbox
+       ${where}
+       ORDER BY id DESC
+       LIMIT 500`,
+      params
+    )
+    res.json({ data: rows })
+  } catch (e) {
+    await logError('STMT_OUTBOX_LIST_FAIL', e)
+    res.status(500).json({ error: 'list failed' })
+  }
+})
+
+
+app.post('/api/statement-hub/push', async (req, res) => {
+  const { ids } = req.body || {}
+  if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids required' })
+
+  try {
+    const [rows] = await pool.query(
+      `SELECT id, participant_ids_csv, plan_ids_csv, payload_b64
+       FROM statements_outbox
+       WHERE id IN (${ids.map(() => '?').join(',')})`,
+      ids
+    )
+
+    let pushed = 0
+    for (const row of rows) {
+      try {
+        const hubResp = await axios.post(`${HUB_BASE}/api/statements`, {
+          participant_id: row.participant_id,
+          plan_id: row.plan_id,
+          period_start: row.period_start,
+          period_end: row.period_end,
+          payload_b64: row.payload_b64,
+        }, {
+          headers: { Authorization: `Bearer ${HUB_KEY}` },
+          timeout: 20000,
+        })
+
+        const extId = hubResp?.data?.id || null
+        await pool.execute(
+          `UPDATE statements_outbox
+             SET status='SENT', attempts=attempts+1, external_id=?, sent_at=NOW()
+           WHERE id=?`,
+          [extId, row.id]
+        )
+        pushed++
+      } catch (e) {
+        const msg = (e.response?.data?.error || e.message || 'push failed').slice(0, 5000)
+        await pool.execute(
+          `UPDATE statements_outbox
+             SET status='FAILED', attempts=attempts+1, error_message=?
+           WHERE id=?`,
+          [msg, row.id]
+        )
+        await logError('STMT_PUSH_FAIL_ONE', { id: row.id, msg })
+      }
+    }
+
+    res.json({ requested: ids.length, pushed })
+  } catch (e) {
+    await logError('STMT_PUSH_BULK_FAIL', e)
+    res.status(500).json({ error: 'push failed' })
+  }
+})
+
+
+app.get('/api/statement-hub/outbox/:id/payload', async (req, res) => {
+  const id = parseInt(req.params.id, 10)
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' })
+  try {
+    const [[row]] = await pool.query(
+      `SELECT payload_b64 FROM statements_outbox WHERE id = ?`,
+      [id]
+    )
+    if (!row) return res.status(404).json({ error: 'Not found' })
+    res.json({ payload_b64: row.payload_b64 })
+  } catch (e) {
+    if (typeof logError === 'function') { await logError('STMT_PREVIEW_FETCH_FAIL', e) }
+    res.status(500).json({ error: 'Failed to fetch payload' })
+  }
+})
+
+app.post('/api/statement-hub/delete', async (req, res) => {
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+    .map(n => parseInt(n, 10))
+    .filter(Number.isFinite)
+
+  if (!ids.length) return res.status(400).json({ error: 'ids required' })
+  try {
+    const placeholders = ids.map(() => '?').join(',')
     await pool.execute(
-      `INSERT INTO participant_element_value
-         (participant_id, element_definition_id, metric_date, value)
-       VALUES (:participantId, :elementDefinitionId, :metricDate, :value)
-       ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP`,
-      { participantId, elementDefinitionId, metricDate, value }
+      `DELETE FROM statements_outbox WHERE id IN (${placeholders})`,
+      ids
     )
-    res.status(201).json({ ok: true })
+    res.json({ deleted: ids.length })
   } catch (e) {
-    console.error(e)
-    res.status(400).json({ error: 'Failed to save metric', detail: e.message })
+    if (typeof logError === 'function') { await logError('STMT_DELETE_FAIL', e) }
+    res.status(500).json({ error: 'Failed to delete' })
   }
 })
 
-// DELETE a metric row
-app.delete('/api/metrics/:id', async (req, res) => {
+// GET /api/payout-history/:id/payload
+app.get('/api/payout-history/:id/payload', async (req, res) => {
+  const id = parseInt(req.params.id, 10)
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'Invalid id' })
   try {
-    const id = Number(req.params.id)
-    await pool.execute('DELETE FROM participant_element_value WHERE id = :id', { id })
-    res.status(204).end()
+    const [[row]] = await pool.query(
+      `SELECT payload FROM participant_payout_history WHERE id = ?`,
+      [id]
+    )
+    if (!row) return res.status(404).json({ error: 'Not found' })
+    res.json({ payload: row.payload })
   } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Failed to delete metric', detail: e.message })
+    if (typeof logError === 'function') { await logError('PAYOUT_PAYLOAD_FETCH_FAIL', e) }
+    res.status(500).json({ error: 'Failed to fetch payload' })
   }
 })
 
+// GET /api/payout-history/resolve
+// Resolves a row by composite fields if you don't have ln.id in the UI.
+// Params: participantId, planId, periodStart, periodEnd, outputLabel, [createdAt]
+app.get('/api/payout-history/resolve', async (req, res) => {
+  const {
+    participantId, planId, periodStart, periodEnd, outputLabel, createdAt
+  } = req.query
 
-// BULK UPSERT metrics from CSV text
-app.post('/api/metrics/bulk', async (req, res) => {
+  if (!participantId || !planId || !periodStart || !periodEnd || !outputLabel) {
+    return res.status(400).json({ error: 'Missing required parameters' })
+  }
+
   try {
-    const { csv, hasHeader = false } = req.body
-    if (!csv || typeof csv !== 'string') {
-      return res.status(400).json({ error: 'Missing csv string in body' })
+    const params = [participantId, planId, periodStart, periodEnd, outputLabel]
+    let sql = `
+      SELECT id, payload
+        FROM participant_payout_history
+       WHERE participant_id = ?
+         AND plan_id        = ?
+         AND period_start   = ?
+         AND period_end     = ?
+         AND output_label   = ?
+    `
+    if (createdAt) {
+      sql += ` AND created_at >= DATE_SUB(?, INTERVAL 5 MINUTE) AND created_at <= DATE_ADD(?, INTERVAL 5 MINUTE)`
+      params.push(createdAt, createdAt)
     }
+    sql += ' ORDER BY created_at DESC LIMIT 1'
 
-    // Very simple CSV parsing (no quotes/escapes). One row per line, comma-delimited.
-    const lines = csv
-      .split(/\r?\n/)
-      .map(l => l.trim())
-      .filter(l => l.length > 0)
-
-    let start = 0
-    if (hasHeader) start = 1 // skip the first line
-
-    // Collect unique participant ids and element names for lookups
-    const rows = []
-    const participantIds = new Set()
-    const elementNames = new Set()
-
-    for (let i = start; i < lines.length; i++) {
-      const raw = lines[i]
-      const parts = raw.split(',').map(s => s.trim())
-      if (parts.length < 4) {
-        rows.push({ line: i + 1, raw, status: 'error', message: 'Expected 4 columns' })
-        continue
-      }
-      const [participantIdStr, elementName, metricDate, valueStr] = parts
-      const participantId = Number(participantIdStr)
-      const value = Number(valueStr)
-
-      rows.push({ line: i + 1, raw, participantId, elementName, metricDate, value, status: 'pending' })
-      if (!Number.isNaN(participantId)) participantIds.add(participantId)
-      if (elementName) elementNames.add(elementName)
-    }
-
-    if (rows.length === 0) return res.json({ total: 0, inserted: 0, updated: 0, errors: [] })
-
-    // Lookup participants that exist
-    const [participants] = await pool.execute(
-      `SELECT id FROM plan_participant WHERE id IN (${[...participantIds].map((_,i)=>`:p${i}`).join(',')})`,
-      Object.fromEntries([...participantIds].map((v,i)=>[`p${i}`, v]))
-    )
-    const participantSet = new Set(participants.map(p => p.id))
-
-    // Lookup element definitions by NAME (element code)
-    const nameParams = Object.fromEntries([...elementNames].map((v,i)=>[`n${i}`, v]))
-    const [elements] = await pool.execute(
-      `SELECT id, name FROM element_definition WHERE name IN (${[...elementNames].map((_,i)=>`:n${i}`).join(',')})`,
-      nameParams
-    )
-    const elementByName = new Map(elements.map(e => [e.name, e.id]))
-
-    // Prepare values to insert
-    const good = []
-    const errors = []
-    for (const r of rows) {
-      if (r.status === 'error') { errors.push(r); continue }
-      if (!participantSet.has(r.participantId)) {
-        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Unknown participant_id ${r.participantId}` })
-        continue
-      }
-      const edId = elementByName.get(r.elementName)
-      if (!edId) {
-        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Unknown element name '${r.elementName}'` })
-        continue
-      }
-      if (!r.metricDate || !/^\d{4}-\d{2}-\d{2}$/.test(r.metricDate)) {
-        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Bad date '${r.metricDate}', expected YYYY-MM-DD` })
-        continue
-      }
-      if (Number.isNaN(r.value)) {
-        errors.push({ line: r.line, raw: r.raw, status: 'error', message: `Bad number value '${r.value}'` })
-        continue
-      }
-      good.push([r.participantId, edId, r.metricDate, r.value])
-    }
-
-    if (good.length === 0) {
-      return res.status(400).json({ total: rows.length, inserted: 0, updated: 0, errors })
-    }
-
-    // Batch insert with upsert
-    // unique key is (participant_id, element_definition_id, metric_date)
-    const valuesSql = good.map((_, i) => `(:p${i}, :e${i}, :d${i}, :v${i})`).join(',')
-    const params = {}
-    good.forEach((row, i) => {
-      params[`p${i}`] = row[0]
-      params[`e${i}`] = row[1]
-      params[`d${i}`] = row[2]
-      params[`v${i}`] = row[3]
-    })
-
-    const [result] = await pool.execute(
-      `INSERT INTO participant_element_value (participant_id, element_definition_id, metric_date, value)
-       VALUES ${valuesSql}
-       ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP`,
-      params
-    )
-    // mysql2 doesn't always split inserted vs updated cleanly; report counts heuristically
-    const affected = result.affectedRows || 0
-    // For ON DUP KEY, each upsert can affect 1 (insert) or 2 (update). We can’t know exact split without extra work.
-    // Return totals + errors; UI can show summary.
-    return res.json({
-      total: rows.length,
-      processed: good.length,
-      affected,
-      errors
-    })
+    const [[row]] = await pool.query(sql, params)
+    if (!row) return res.status(404).json({ error: 'Not found' })
+    res.json({ id: row.id, payload: row.payload })
   } catch (e) {
-    console.error(e)
-    res.status(500).json({ error: 'Bulk import failed', detail: e.message })
+    if (typeof logError === 'function') { await logError('PAYOUT_PAYLOAD_RESOLVE_FAIL', e) }
+    res.status(500).json({ error: 'Failed to resolve payload' })
   }
 })
-*/
