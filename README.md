@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="varcac.png" width=400>
+  <img src="varcac_alt.png" width=400>
 
 </p>
 
