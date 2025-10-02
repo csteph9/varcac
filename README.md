@@ -39,13 +39,6 @@
 
 ---
 
-## Architecture (some technicals)
-- **Client:** Vue + Vite SPA
-- **Server:** Express (Node 22+) serving API and static assets on **port 3001**
-- **DB:** MariaDB (containerized).
-
----
-
 ## Quick start (Docker)
 **Prereqs:** Docker Desktop.
 
