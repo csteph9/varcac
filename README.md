@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="varcac_alt.png" width=400>
+  <img src="[varcac_alt.png](https://github.com/csteph9/varcac/blob/main/varcac_alt.png?raw=true)" width=400>
 
 </p>
 
